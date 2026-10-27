@@ -1,0 +1,17 @@
+# 让 git 自己判断文本与二进制，避免 Windows 换行把整个文件标成"已改动"
+* text=auto
+
+# 源码与文档统一 LF
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+
+# 批处理必须是 CRLF，否则 cmd 解析会出错
+*.bat   text eol=crlf
+
+# 二进制，绝不改动
+*.dll   binary
+*.exe   binary
+*.png   binary
+*.ico   binary

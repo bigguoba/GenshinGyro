@@ -1,0 +1,64 @@
+原神陀螺仪助手 · 第三方组件与出处说明
+======================================================================
+
+公开发行版（GitHub Releases 里的压缩包）包含下面这些第三方组件。
+仓库源码本身是原创实现，没有拷贝任何第三方源代码。
+
+----------------------------------------------------------------------
+1. 随包分发的二进制
+----------------------------------------------------------------------
+
+ViGEmClient.dll
+    Nefarius Software Solutions e.U. 的 ViGEm 客户端库。
+    许可证：BSD-3-Clause
+    来源：https://github.com/nefarius/ViGEmClient
+    位置：vendor/ViGEmClient.dll（打包后在 exe 旁边）
+
+    BSD-3-Clause 允许在保留版权声明的前提下分发二进制，
+    本文件即为该声明。
+
+Python 解释器与标准库
+    发行包由 PyInstaller 打包，内含 CPython 解释器（含 tkinter/Pillow）。
+    许可证：Python Software Foundation License（https://docs.python.org/3/license.html）
+    Pillow：MIT-CMU（https://python-pillow.org）
+
+----------------------------------------------------------------------
+2. 需要用户自行安装（不随包分发）
+----------------------------------------------------------------------
+
+ViGEmBus
+    虚拟手柄的内核驱动，作者同上。
+    许可证：BSD-3-Clause
+    下载：https://github.com/nefarius/ViGEmBus/releases
+
+    本程序不自带、也不修改该驱动；没有它就不会出现虚拟手柄。
+
+----------------------------------------------------------------------
+3. 仅作为协议文档参考，未包含其代码
+----------------------------------------------------------------------
+
+下列项目被用来核对报文格式、字段偏移与单位换算。它们是"参考资料"，
+不是本项目的依赖；本项目按文档描述自行实现。
+
+  * dekuNukem/Nintendo_Switch_Reverse_Engineering
+    蓝牙 HID 笔记 / 子命令 / IMU 采样 / SPI 标定 / USB HID 笔记
+    https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering
+
+  * Linux 内核 hid-nintendo.c（GPL-2.0）——Switch 手柄的驱动实现
+  * Linux 内核 hid-playstation.c（GPL-2.0）——DualShock 4 报文布局与单位
+  * SDL3 SDL_hidapi_switch.c / SDL_hidapi_ps4.c（zlib）——轴向归一与蓝牙输出报文
+  * JoyShockLibrary、Unity Input System（各自许可证）——交叉验证用
+
+  GPL-2.0 的代码没有被引用、链接或改写进本项目：以上仅用于确认
+  "字节 13 起是 IMU""hw_control 要置 0xC4"这类**事实**，而事实不受版权保护。
+  本项目自己的实现以 MIT 发布（见 LICENSE）。
+
+----------------------------------------------------------------------
+4. 商标
+----------------------------------------------------------------------
+
+Nintendo Switch、Joy-Con、Pro Controller 是任天堂株式会社的商标；
+DualShock、PlayStation 是索尼互动娱乐的商标；
+原神是米哈游的商标。
+
+本项目与上述公司没有任何隶属或授权关系，商标仅用于说明兼容性。
