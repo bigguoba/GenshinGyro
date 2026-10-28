@@ -18,10 +18,18 @@
 
 二、打开程序
 
-  双击「启动-图形界面.bat」。
+  双击「GenshinGyro.exe」。
 
   如果 Windows 弹「Windows 已保护你的电脑 / 未知发布者」：
   点「更多信息」→「仍要运行」。exe 没有数字签名，这是必然结果，不是文件有问题。
+
+  想要控制台模式（不弹窗口、直接转发）就打开 cmd，cd 到本目录：
+      GenshinGyro.exe --cli                        整机转发（自动识别手柄）
+      GenshinGyro.exe --cli --source ds4           实体 DS4 全量转发
+      GenshinGyro.exe --cli --source ds4 --motion-only
+                                                   仅体感 + Share 当触控板
+      GenshinGyro.exe --cli --source ds4 --no-virtual-pad --verbose
+                                                   只唤醒手柄体感、不建虚拟手柄（诊断）
 
 三、界面说明
 
@@ -152,16 +160,13 @@
 
 七、文件说明
 
-  GenshinGyro.exe            主程序（无签名；直接双击可能弹 SmartScreen）
+  GenshinGyro.exe            主程序（无签名；双击可能弹一次 SmartScreen）
   _internal\                 运行库，请勿删除或移动
-  启动-图形界面.bat          等同双击 exe（走 .bat 可避开 SmartScreen）
-  启动-直接转发.bat          控制台：自动选输入，整机转发
-  启动-DS4中继.bat           控制台：实体 DS4 全量转发（按键+摇杆+体感）
-  启动-DS4仅体感.bat         控制台：仅体感 + Share 当触控板（等同原神推荐）
-  启动-只唤醒手柄体感.bat     控制台：不建虚拟手柄，只把实体手柄保持在完整报文模式（诊断用）
   快速开始.txt               本文件
   README.md                  完整说明（含技术原理与实测数据）
   CHANGELOG.md               各版本做了什么
   LICENSE                    以 MIT 许可发布
   NOTICE.txt                 第三方组件与出处
   source\                    完整源码快照（可自行重新打包，见其中 build_exe.bat）
+
+  发行包里没有再附带 启动-*.bat：直接用 GenshinGyro.exe，控制台模式的命令行见第二节。

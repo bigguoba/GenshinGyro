@@ -174,7 +174,7 @@ NS 模式必须用它，因为原神会把 NS 模式手柄识别成错误的东�
 2. 到 [Releases](https://github.com/bigguoba/GenshinGyro/releases) 下载最新的
    `GenshinGyro-vX.Y.Z-win64.zip`，
    **解压到整个文件夹**——不要把 exe 单独拖出来，它旁边的 `_internal` 是必需品。
-3. 双击解压目录里的 **`启动-图形界面.bat`**。
+3. 双击解压目录里的 **`GenshinGyro.exe`**。
 4. 按上面那张表判断原神怎么反应，选对应的模式；NS 模式记得先配好 HidHide。
 
 **要求**：Windows 10 / 11 **x64** + ViGEmBus（用虚拟 DualSense 或震动时另需 VIIPER）。
@@ -183,7 +183,10 @@ NS 模式必须用它，因为原神会把 NS 模式手柄识别成错误的东�
 
 > **首次运行会被 Windows 拦一次。** exe 没有数字签名，会弹「Windows 已保护你的电脑 / 未知发布者」。
 > 点「**更多信息**」→「**仍要运行**」即可。这是没有购买代码签名证书的必然结果，不是文件有问题。
-> 走 `.bat` 启动通常不会触发这道提示。
+
+> 想要**控制台模式**（不弹窗口、直接转发）：打开 cmd，cd 到解压目录，运行
+> `GenshinGyro.exe --cli`（整机转发）、`--cli --source ds4 --motion-only`（仅体感）等。
+> 发行包不再附带 `启动-*.bat`，所有入口就是 exe 本身。
 
 ## 常见问题
 
