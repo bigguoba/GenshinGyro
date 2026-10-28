@@ -43,6 +43,15 @@ VIIPER
     启动（TCP 127.0.0.1:3242）并按它公开的协议通信。它不开源本程序，
     本程序也不链接它的代码 —— 两者是各自独立的进程。
 
+usbip-win2
+    USB/IP 的内核驱动 + usbip.exe，VIIPER 的底层依赖，装一次即可。
+    许可证：2-Clause BSD（0.9.7.0 起）
+    来源：https://github.com/vadimgrn/usbip-win2
+    指定版本：0.9.7.7（VIIPER 按这个版本开发，别的版本它会拒绝运行）
+
+    本程序不自带、也不安装它；本程序与它没有代码关系，
+    它只作为系统级驱动被 VIIPER 使用。
+
 HidHide（可选）
     设备隐藏过滤驱动，NS 模式需要。
     下载：https://github.com/nefarius/HidHide/releases

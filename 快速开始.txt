@@ -10,9 +10,14 @@
     2. 下载 ViGEmBus_*.exe 并安装（需要管理员权限）
     3. 提示重启就重启
 
-  另外两个按需准备：
-    * VIIPER —— 只有「转发到虚拟 DualSense」和「PS5 手柄原生震动」需要它。
-      到 https://github.com/alia5/VIIPER/releases 下载 VIIPER-*-x64.exe，
+  另外两个按需准备（都是"用虚拟 DualSense / 震动"才需要，先驱动后程序）：
+    * usbip-win2 —— USB/IP 的内核驱动，VIIPER 的底层，只装一次。
+      到 https://github.com/vadimgrn/usbip-win2/releases/tag/v.0.9.7.7
+      下载 0.9.7.7 的 x64 安装包，管理员权限安装（装完重启一次）。
+      ★ 版本必须是 0.9.7.7：装别的版本 VIIPER 会直接报「requires usbip-win2 0.9.7.7」。
+      ★ 默认装到 C:\Program Files\USBip\（里面有 usbip.exe），VIIPER 会自己找到，
+        不用手动加 PATH；装到别处就要把那个目录加进 PATH。
+    * VIIPER —— 到 https://github.com/alia5/VIIPER/releases 下载 VIIPER-*-x64.exe，
       放到 GenshinGyro.exe 旁边（或它的上一级目录）即可，程序会自己启动它。
     * HidHide —— NS 模式必须，其它情况见第四节。
 

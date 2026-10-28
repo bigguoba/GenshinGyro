@@ -49,7 +49,7 @@ Switch Pro ──HID──> 解析 + 标定 ──> DS4 报文 ──ViGEmBus─
 **关于"工具显示虚拟手柄是 300 Hz 而不是真机的 250 Hz"**：那是**读取节奏**，不是数据节奏。
 真机的报文由 USB 中断端点定速（bInterval 4 ms → 上限 250 Hz）；ViGEm 的模拟设备则是
 每来一次读就立刻返回最新状态，所以拼命轮询会量到 300 Hz 左右。
-实测（`tools/read_rate_probe.py`，同一只手柄同一个中继）：尽快读 → 308 条/秒，
+实测（同一只手柄、同一个中继）：尽快读 → 308 条/秒，
 按 250 Hz 读 → **正好 250 条/秒**，而两次的**不同体感样本数完全相同**、时间戳步长恒为 768。
 
 ## 按键映射
@@ -243,20 +243,17 @@ accel_origin = (0, 0, 295)
 
 ## 工具
 
-`tools/` 下是本机诊断用的脚本，不参与发行：
+`tools/` 下是本机诊断与测试用的脚本，不参与发行。仓库里只留必要的这些；
+早期的一次性探针（报文勘察、真机/虚拟对比、震动早期试验）已经移出，结论都留在本文里。
 
 | 脚本 | 作用 |
 |---|---|
-| `dump_switch.py` | 实体手柄读数（`--analyze` 看静止姿态） |
-| `probe_ds4_frame.py` | 读实体 DS4 的静止姿态，确认轴向 |
-| `dump_ds4.py` | DS4 报文结构分析（速率、候选偏移得分、逐字节变化） |
 | `which_pad.py` | 识别 Sony/Nintendo 设备、区分真实/ViGEm 虚拟手柄 |
-| `read_rate_probe.py` | 测读取节奏与不同样本率 |
-| `watch_virtual_ds4.py` | 监视虚拟手柄的输出 |
-| `record_session.py` | 把一段时间的手柄读数写成日志 |
-| `compare_motion_streams.py` | 对比两路体感流 |
+| `dump_hid.py` | dump 任意 HID 手柄的报文布局（适配新设备用） |
+| `audio_rumble.py` | 音频→震动的命令行入口（`--list-endpoints` / `--case` / `--menu`），逻辑在根目录 `haptics.py` |
 | `rumble_probe.py` | 四种组合的震动报文自测（强度 / 频段 / 左右），`Session.set_levels()` 就是产品用的那套 |
-| `audio_rumble.py` | 音频→震动的命令行薄壳（`--list-endpoints` / `--case` / `--create-endpoint`），逻辑在根目录 `haptics.py` |
-| `haptics_probe.py` | 更早的音频震动探针（保留作对照） |
+| `haptics_probe.py` | 采集虚拟 DualSense 音频端点并驱动手柄（排障用，`--no-rumble` 只看不震） |
 | `viiper_audio_device.py` | 只建音频端点并保持（排障用），`--start-server` 顺带拉起 VIIPER |
-| `viiper_smoke.py` / `viiper_readback.py` / `viiper_probe.py` | VIIPER 协议与虚拟 DualSense 状态的自测与回读 |
+| `viiper_smoke.py` | VIIPER 协议自测：建 bus、加设备、接流、戳一下 |
+| `test_*.py`（9 个） | 回归测试，README「已经验证到什么程度」里的那 967 项 |
+| `grab_window.py` `close_window.py` `list_process_windows.py` | 截图 / 关窗 / 列窗口（封版冒烟用） |

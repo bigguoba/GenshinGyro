@@ -109,18 +109,20 @@ v1.4.0 起还能转发成一只**虚拟 DualSense（PS5 手柄）**，并加上*
 - **其他游戏未经验证。** 本软件为原神而做，别的游戏能不能用没有测试过
 - **震动只走"音频触觉"这一条路。** 游戏必须真的往 DualSense 音频端点写触觉音频才会有震动；
   只发普通 rumble 输出报文的游戏（大多数 PC 游戏）不会触发它。手柄本身也不能是 Xbox 那种没有触觉的马达结构 —— DS4 / NS Pro 都验过
-- **不带 VIIPER。** 虚拟 DualSense 与震动所需的 VIIPER 是一个独立的 GPL-3.0 程序，
-  需要你自己下载放到程序旁边（见下一节）
+- **不带 VIIPER，也不带 usbip-win2 驱动。** 这两样都是独立的第三方组件
+  （GPL-3.0 / 2-Clause BSD），需要你自己装一次 / 下一份放到程序旁边（见下一节）
 
 ## 驱动与可选工具
 
-本程序自身不安装任何驱动，但虚拟手柄来自 **ViGEmBus**；另外有一个可选的
+本程序自身不安装任何驱动，但虚拟手柄来自 **ViGEmBus**；虚拟 DualSense 与震动还要
+**usbip-win2** 和 **VIIPER** 两样东西（都是装上就完事，不需要每次启动）；另外有一个可选的
 **HidHide**，在上面那张表里有时是"必须"、有时是"绝对不要"。
 
 | 组件 | 必需？ | 作用 | 不做会怎样 |
 |---|---|---|---|
 | **ViGEmBus** | 用虚拟 DualShock 4 时必需 | 创建虚拟手柄的内核驱动 | 程序能开，但永远不出现虚拟 DualShock 4 |
-| **VIIPER** | 用虚拟 DualSense / 震动时必需 | 本地 USB/IP 设备代理，创建虚拟 DualSense 和它的音频端点 | 那两个功能会报「没找到 VIIPER-*.exe」或「VIIPER 服务没有起来」；虚拟 DualShock 4 不受影响 |
+| **usbip-win2** | 用虚拟 DualSense / 震动时必需 | USB/IP 的内核驱动 + `usbip.exe`（VIIPER 的底层） | VIIPER 起不来或报「usbip-win2 驱动没找到」，那两个功能都用不了 |
+| **VIIPER** | 用虚拟 DualSense / 震动时必需 | 本地 USB/IP 设备代理，创建虚拟 DualSense 和它的音频端点 | 会报「没找到 VIIPER-*.exe」或「VIIPER 服务没有起来」；虚拟 DualShock 4 不受影响 |
 | **HidHide** | 视情况 | 把实体手柄从其他程序眼里藏起来 | NS 模式不装会键值错乱；"认按键不认体感"的情况装了反而坏 |
 
 ### ViGEmBus（必需）
@@ -136,14 +138,37 @@ Linux 上对应的是内核自带的 `uhid`/`hid-playstation`，Windows 上必�
 > 装完驱动后**手柄不需要做任何事**：虚拟手柄由本程序在运行时创建，
 > 关掉程序就一起消失，不会在系统里留下一个常驻的假手柄。
 
+### usbip-win2（虚拟 DualSense / 震动才需要，装一次）
+
+VIIPER 造出来的"虚拟 USB 设备"要靠 **USB/IP** 这个协议挂进 Windows，而 USB/IP 需要一个
+内核驱动 —— Windows 上没有自带的，用的是 [usbip-win2](https://github.com/vadimgrn/usbip-win2)
+（2-Clause BSD，签名驱动）。**装一次就行，之后开机自动可用。**
+
+1. 打开 [usbip-win2 0.9.7.7 发布页](https://github.com/vadimgrn/usbip-win2/releases/tag/v.0.9.7.7)
+2. 下载 x64 的安装包（`usbip-win2-0.9.7.7-x64.exe` 或同版本 MSI），管理员权限安装
+3. 提示重启就重启
+
+> **版本要对**：VIIPER 是照 `usbip-win2 0.9.7.7` 写的，装了别的版本它会直接报
+> 「USB/IP prerequisite failed: VIIPER requires usbip-win2 0.9.7.7」。装错了就卸掉重装这一个版本。
+>
+> **装到哪**：默认是 `C:\Program Files\USBip\`，里面有 `usbip.exe`。VIIPER 会自己去这个位置找，
+> **不需要手动加 PATH**；如果你装到别处，要把那个目录加进 PATH，否则 VIIPER 会报
+> 「USB/IP tool 'usbip.exe' not found in PATH」。
+>
+> 装完可以用管理员 cmd 运行 `usbip list -l` 验证：能列出本机 USB 设备就说明驱动正常。
+
 ### VIIPER（虚拟 DualSense / 震动才需要）
 
 [VIIPER](https://github.com/alia5/VIIPER/releases) 是一个独立的本地 USB/IP 设备代理
 （GPL-3.0，本项目不附带它）。它负责创建虚拟 DualSense 和那只手柄的音频端点。
+它依赖上面的 usbip-win2，所以**顺序是：先装 usbip-win2，再放 VIIPER**。
 
 1. 到 Releases 下载 `VIIPER-*-x64.exe`
 2. 放到 **`GenshinGyro.exe` 旁边**（或它所在的上一级目录）
 3. 不用手动启动：打开「转发到虚拟 DualSense」或「PS5 手柄原生震动」时，程序会自己把它拉起来
+
+> 出问题时先单独跑一次 VIIPER：双击 `VIIPER-*.exe`，它会自己开一个控制台并把
+> 「usbip-win2 driver found / not found」写在第一行 —— 那行就是问题所在。
 
 > 两个功能可以分开用：**只做震动**不需要转发到虚拟 DualSense —— 震动开关会自己建一台
 > 只带音频、没有手柄的虚拟 DualSense。反过来只转发 DualSense 不开震动也完全正常。
@@ -177,7 +202,7 @@ NS 模式必须用它，因为原神会把 NS 模式手柄识别成错误的东�
 3. 双击解压目录里的 **`GenshinGyro.exe`**。
 4. 按上面那张表判断原神怎么反应，选对应的模式；NS 模式记得先配好 HidHide。
 
-**要求**：Windows 10 / 11 **x64** + ViGEmBus（用虚拟 DualSense 或震动时另需 VIIPER）。
+**要求**：Windows 10 / 11 **x64** + ViGEmBus（用虚拟 DualSense 或震动时另需 usbip-win2 驱动 + VIIPER）。
 不需要装 Python，运行时不联网。
 手柄用 USB 或蓝牙都行，蓝牙需要先在系统里配对好。
 
@@ -294,7 +319,7 @@ python tools\test_ds4_output_path.py :: 10 项
 
 需要 Python 3.12（标准库即可；装了 Pillow 会启用抗锯齿渲染）。
 震动功能另需 `numpy` 与 `pyaudiowpatch`（`pip install numpy pyaudiowpatch`）；
-虚拟 DualSense 与震动还需要 VIIPER 的 `VIIPER-*.exe`。
+虚拟 DualSense 与震动还需要 usbip-win2 驱动和 `VIIPER-*.exe`（见「驱动与可选工具」）。
 
 ```bat
 python main.py --gui              :: 图形界面
