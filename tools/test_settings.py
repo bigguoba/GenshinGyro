@@ -66,9 +66,9 @@ def main() -> int:
         check("读回 3.5", settings.gyro_gain(path), 3.5)
         with open(path, encoding="utf-8") as handle:
             stored = json.load(handle)
-        check("文件里有全部记忆项（含三个死区与勾选框状态）",
+        check("文件里有全部记忆项（含三个死区、勾选框与键位互换）",
               sorted(stored), ["deadzone_pitch", "deadzone_roll", "deadzone_yaw",
-                              "gyro_gain", "mode"])
+                              "gyro_gain", "mode", "swap_face_buttons"])
         check("文件里存的就是 3.5", stored["gyro_gain"], 3.5)
 
         print("\n[2] 精度与范围")
@@ -128,9 +128,9 @@ def main() -> int:
               settings.motion_deadzone(path), (0.0, 0.0, 1.1))
         with open(path, encoding="utf-8") as handle:
             keys = sorted(json.load(handle))
-        check("五个记忆项都在同一个文件里",
+        check("六个记忆项都在同一个文件里",
               keys, ["deadzone_pitch", "deadzone_roll", "deadzone_yaw", "gyro_gain",
-                     "mode"])
+                     "mode", "swap_face_buttons"])
 
         print("\n[3d] 勾选框状态（mode）")
         check("默认 off", settings.mode(path), "off")
@@ -141,6 +141,18 @@ def main() -> int:
         check("非法 mode 回退 off", settings.set_mode("nonsense", path), "off")
         settings.set_mode("full", path)
         check("full 可以存", settings.mode(path), "full")
+
+        print("\n[3e] 键位互换（swap_face_buttons）")
+        check("默认关", settings.swap_face_buttons(path), False)
+        check("写入 True 返回 True", settings.set_swap_face_buttons(True, path), True)
+        check("读回 True", settings.swap_face_buttons(path), True)
+        check("存互换不会清掉勾选框", settings.mode(path), "full")
+        check("存互换不会清掉灵敏度", settings.gyro_gain(path), 2.0)
+        check("字符串 false 当关闭", settings.clamp_flag("false"), False)
+        check("数字 1 当打开", settings.clamp_flag(1), True)
+        check("乱写回退关闭", settings.clamp_flag("乱写"), False)
+        check("写回 False", settings.set_swap_face_buttons(False, path), False)
+        check("读回 False", settings.swap_face_buttons(path), False)
 
         print("\n[4] 目录不可写时不抛异常")
         nested = os.path.join(directory, "no_such_dir", "deep", "settings.json")

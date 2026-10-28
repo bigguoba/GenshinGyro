@@ -23,6 +23,8 @@ DEFAULT_SETTINGS: dict = {
     "deadzone_yaw": 0.0,
     "deadzone_roll": 0.0,
     "mode": "off",
+    #: exchange the virtual pad's ✕↔○ and □↔△.
+    "swap_face_buttons": False,
 }
 
 #: Same limits as the GUI sliders.
@@ -145,4 +147,34 @@ def set_mode(value: str, path: str | None = None) -> str:
     """Remember the checkbox state; returns what was actually stored."""
     chosen = value if value in MODE_CHOICES else MODE_DEFAULT
     save({"mode": chosen}, path)
+    return chosen
+
+
+def clamp_flag(value) -> bool:
+    """Coerce anything into a usable on/off value.
+
+    JSON holds real booleans, but a hand-edited file may contain ``"true"``,
+    ``1`` or ``""``.  Those have an obvious meaning; everything else falls back
+    to off, which is the safe direction for a switch that changes the controls.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+    return False
+
+
+def swap_face_buttons(path: str | None = None) -> bool:
+    """Whether the face buttons were being exchanged when the program last closed."""
+    return clamp_flag(load(path).get("swap_face_buttons"))
+
+
+def set_swap_face_buttons(value, path: str | None = None) -> bool:
+    """Remember the face-button exchange; returns what was actually stored."""
+    chosen = clamp_flag(value)
+    save({"swap_face_buttons": chosen}, path)
     return chosen

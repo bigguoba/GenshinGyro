@@ -389,6 +389,9 @@ class App:
         # Remembered sensitivity and anti-deadzone from the last run
         # (settings.json beside the exe).
         self.config.gyro_gain = settings.gyro_gain()
+        # Remembered like the sensitivity: the window shows exactly what the
+        # virtual pad was doing when the program last closed.
+        self.config.swap_face_buttons = settings.swap_face_buttons()
         self.deadzone = settings.motion_deadzone()
         self.config.motion_deadzone_dps = tuple(self.deadzone)
         self.source = source
@@ -484,7 +487,7 @@ class App:
         label_column = int(max(label_font.measure(text) for text in (
             "虚拟手柄只转发体感（按键留给实体手柄）",
             "完整转发到虚拟 DualShock 4", "输入手柄", "体感灵敏度",
-            "死区补偿 · 俯仰")) + px(20))
+            "× 与 ○ 互换，□ 与 △ 互换", "死区补偿 · 俯仰")) + px(20))
 
         def section(title: str, top: int = ui_theme.SPACE_MD) -> tk.Frame:
             """A titled card; rows go inside the returned frame."""
@@ -533,6 +536,16 @@ class App:
             motion_row, self.motion_only_var, command=self.toggle_motion_only,
             scale=self.scale)
         self.motion_check.pack(side="right")
+
+        # The virtual pad's face buttons can be exchanged without touching the
+        # controller, so a pad laid out one way still fits a game that expects the
+        # other.  Independent of the forwarding mode above.
+        self.swap_face_var = tk.BooleanVar(value=self.config.swap_face_buttons)
+        swap_row = row(mode_card, "× 与 ○ 互换，□ 与 △ 互换")
+        self.swap_face_check = ui_theme.ToggleSwitch(
+            swap_row, self.swap_face_var, command=self.toggle_swap_face_buttons,
+            scale=self.scale)
+        self.swap_face_check.pack(side="right")
 
         self.share_note = tk.Label(
             footer, text=f"两种模式都会把 {SHARE_NOTE} 用作触控板按下",
@@ -739,6 +752,17 @@ class App:
         """Checkbox 2: motion only, so the physical pad keeps buttons and sticks."""
         self.apply_mode(MODE_MOTION if self.motion_only_var.get() else MODE_OFF)
 
+    def toggle_swap_face_buttons(self) -> None:
+        """Exchange ✕↔○ and □↔△ on the virtual pad, and remember the choice.
+
+        Independent of the forwarding mode: it only rewrites the four face-button
+        bits on their way into the virtual pad, so the physical controller needs no
+        settings of its own.  In "motion only" mode the report carries no buttons at
+        all, which makes the switch a no-op there rather than a contradiction.
+        """
+        self.config.swap_face_buttons = settings.set_swap_face_buttons(
+            self.swap_face_var.get())
+
 
 
 
@@ -942,7 +966,7 @@ def main(argv: list[str] | None = None) -> int:
     # --debug-layout report below prints req/alloc widths so clipping is
     # verifiable without eyeballing pixels.
     scale = max(1.0, root.winfo_fpixels("1i") / 96.0)
-    width, height = int(800 * scale), int(556 * scale)
+    width, height = int(800 * scale), int(600 * scale)
     if args.debug_layout:
         print(f"screen = {root.winfo_screenwidth()}x{root.winfo_screenheight()}  "
               f"dpi scale = {root.winfo_fpixels('1i') / 96.0:.3f}  "
@@ -951,7 +975,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"report  = {paths.app_path('verification_report.json')}", flush=True)
         print(f"fixes   = {mapping.captured_mapping_path()}", flush=True)
     root.geometry(f"{width}x{height}+40+40")
-    root.minsize(int(760 * scale), int(520 * scale))
+    root.minsize(int(760 * scale), int(564 * scale))
 
     app = App(root, forward=args.forward, demo=args.demo, topmost=args.topmost,
               scale=scale, source=args.source)

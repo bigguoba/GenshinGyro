@@ -295,6 +295,13 @@ class MappingConfig:
     #: --motion-only on the command line).
     share_as_touchpad: bool = False
 
+    #: exchange the two pairs of face buttons on the virtual pad: ✕↔○ and □↔△.
+    #: Games disagree about which physical button means "confirm", so this lets one
+    #: controller match either layout without re-learning the controls.  Only those
+    #: four bits move -- the d-pad hat, shoulders, triggers and Share/Options are
+    #: untouched.  Off by default.
+    swap_face_buttons: bool = False
+
     #: How motion is paced onto the virtual pad: "hardware" (reproduce a real
     #: wired pad: 4.096 ms reports, timestamp +768, sample held over two reports),
     #: "smooth" (interpolated ~400 Hz, pretty waveform) or "raw" (one report per
@@ -467,7 +474,7 @@ class SwitchToDS4Mapper:
         # "-" on the Switch Pro becomes the Share bit, so this turns it into the
         # touchpad click when the user asked for that.
         buttons, special = apply_share_as_touchpad(buttons, special, self.config)
-        self.pad.set_buttons(buttons, special)
+        self.pad.set_buttons(swap_face_buttons(buttons, self.config), special)
         self.pad.set_sticks(*self._sticks(state))
         self.pad.set_triggers(*self._triggers(state))
         level, charging = self._battery(state)
@@ -521,6 +528,28 @@ class SwitchToDS4Mapper:
 #: "special" byte (the same place real hardware reports it).
 SHARE_MASK = 1 << 12
 TOUCHPAD_MASK = 0x02
+
+#: The pairs "swap face buttons" exchanges, as DS4 button bits.  The low nibble of
+#: the button word is the d-pad hat, so these bits never collide with it.
+FACE_BUTTON_PAIRS = (
+    (vigem.DS4_BUTTONS["cross"], vigem.DS4_BUTTONS["circle"]),      # ✕ <-> ○
+    (vigem.DS4_BUTTONS["square"], vigem.DS4_BUTTONS["triangle"]),   # □ <-> △
+)
+
+
+def swap_face_buttons(buttons: int, config: "MappingConfig") -> int:
+    """Exchange ✕↔○ and □↔△ in a DS4 button word.
+
+    A pair is exchanged by flipping both of its bits, which is only right when
+    exactly one of the two is down.  When both are down (or neither is), each
+    state maps onto itself, so the word is returned unchanged instead.
+    """
+    if not config.swap_face_buttons:
+        return buttons
+    for first, second in FACE_BUTTON_PAIRS:
+        if bool(buttons & first) != bool(buttons & second):
+            buttons ^= first | second
+    return buttons
 
 
 def apply_motion_deadzone(gyro, config: "MappingConfig"):
@@ -782,6 +811,8 @@ class DS4ToDS4Relay:
             report.bSpecial = state.special
             report.bTriggerL, report.bTriggerR = state.triggers
         self._apply_share_mapping(state, report)
+        # Last thing before the report is submitted: the face buttons the game sees.
+        report.wButtons = swap_face_buttons(report.wButtons, self.config)
         self.pad.set_battery_byte(state.battery)
 
     def _apply_share_mapping(self, state, report) -> None:
