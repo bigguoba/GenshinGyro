@@ -133,6 +133,42 @@ def run_tests(app) -> None:
     check("说明里提到 -", "-" in note, True)
     check("说明里提到触控板", "触控板" in note, True)
 
+    print("\n[2g] 转发到虚拟 DualSense（与另外两个转发模式互斥）")
+    check("有 DS5 开关", hasattr(app, "ds5_var"), True)
+    check("默认关", app.ds5_var.get(), False)
+    forwarded = []
+    app.worker.set_forwarding = lambda enabled: forwarded.append(enabled)
+
+    app.ds5_var.set(True)
+    app.toggle_ds5()
+    check("模式 = ds5", app.mode, gui.MODE_DS5)
+    check("完整转发被取消", app.forward_var.get(), False)
+    check("仅体感被取消", app.motion_only_var.get(), False)
+    check("按键照转（不是仅体感）", app.config.motion_only, False)
+    check("Share 映射照旧开着", app.config.share_as_touchpad, True)
+    check("worker 换成 DualSense 后端", app.worker.backend, "dualsense")
+    check("要求开启转发", forwarded[-1], True)
+    check("提示里写了虚拟 DualSense",
+          "DualSense" in app.worker_label.cget("text"), True)
+    check("模式被记住", settings.mode(), "ds5")
+
+    app.forward_var.set(True)
+    app.toggle_forward()
+    check("再点完整转发 -> DS5 被取消", app.ds5_var.get(), False)
+    check("后端换回 vigem", app.worker.backend, "vigem")
+    check("模式 = full", app.mode, gui.MODE_FULL)
+
+    app.ds5_var.set(True)
+    app.toggle_ds5()
+    app.motion_only_var.set(True)
+    app.toggle_motion_only()
+    check("再点仅体感 -> DS5 被取消", app.ds5_var.get(), False)
+    check("模式 = motion", app.mode, gui.MODE_MOTION)
+    app.motion_only_var.set(False)
+    app.toggle_motion_only()
+    check("全部取消 -> off", app.mode, gui.MODE_OFF)
+    check("off 时后端回到 vigem", app.worker.backend, "vigem")
+
     print("\n[3] gyro sensitivity: slider and entry stay in sync")
     app.gain_scale.set(2.5)
     app._on_gain_scale()

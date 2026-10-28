@@ -21,9 +21,11 @@ import sys
 import time
 
 import dualshock4
+import haptics
 import hidwin
 import mapping
 import selftest
+import settings
 import sources
 import switchpro
 import version
@@ -130,13 +132,18 @@ class Bridge:
 
     def __init__(self, config: mapping.MappingConfig, verbose: bool = False,
                  device_path: str | None = None, source: str = "auto",
-                 no_virtual_pad: bool = False, backend: str = "vigem"):
+                 no_virtual_pad: bool = False, backend: str = "vigem",
+                 haptics_enabled: bool | None = None):
         self.config = config
         self.verbose = verbose
         self.device_path = device_path
         self.source = source
         self.no_virtual_pad = no_virtual_pad
         self.backend = backend
+        #: None = use the window's remembered switch; True/False = the command
+        #: line asked for it explicitly (--haptics / --no-haptics).
+        self.haptics_enabled = haptics_enabled
+        self._haptics: haptics.HapticsEngine | None = None
         self._last_verbose = 0.0
         self._reports = 0
 
@@ -150,6 +157,49 @@ class Bridge:
         if kind == "ds4":
             return mapping.DS4ToDS4Relay(controller, pad, self.config)
         return mapping.SwitchToDS4Mapper(controller, pad, self.config)
+
+    # -- audio haptics ---------------------------------------------------- #
+
+    def haptics_wanted(self) -> bool:
+        if self.haptics_enabled is not None:
+            return bool(self.haptics_enabled)
+        return settings.haptics_enabled()
+
+    def _start_haptics(self, kind: str, controller) -> "haptics.HapticsEngine | None":
+        """Start audio haptics for this session, or explain why not.
+
+        Only the VIIPER backend works: the virtual DualSense is what carries the
+        audio endpoint a game sends its haptics audio to.  The engine reuses that
+        endpoint (``allow_create=False``) so it can never add a second virtual
+        audio device next to the backend's own, and it drives the *physical* pad
+        whose handle this session already owns -- no second HID handle is opened
+        for the rumble writes.
+        """
+        if not self.haptics_wanted():
+            return None
+        if self.backend != "dualsense":
+            log("音频震动需要 --backend dualsense（只有虚拟 DualSense 才带音频端点）")
+            return None
+        if kind != "switch":
+            log("音频震动目前只支持 Switch Pro 输入（DS4 输入 + DS5 输出还没做）")
+            return None
+        engine = haptics.HapticsEngine(
+            endpoint=haptics.AudioEndpoint(allow_create=False, log=log), log=log)
+        # 六个滑块 + 两个开关；和窗口用的是同一条套用路径。
+        haptics.apply_tuning(engine, settings.haptics_tuning())
+        try:
+            # 不借这个会话的手柄句柄：震动自己开一个，手柄断开时主程序关自己的
+            # 句柄，不会和震动写入撞在同一个 handle 上（那会直接崩）。
+            engine.start(haptics.pad_kind(kind),
+                         getattr(controller, "transport", "usb"))
+        except haptics.HapticsError as exc:
+            log(f"音频震动没起来：{exc}")
+            return None
+        except Exception as exc:                    # noqa: BLE001 - 震动不能拖垮转发
+            log(f"音频震动没起来（未预期的错误）：{exc}")
+            return None
+        log(f"音频震动已开启：{engine.endpoint_name}")
+        return engine
 
     # -- one controller session ------------------------------------------ #
 
@@ -184,7 +234,14 @@ class Bridge:
             if self.config.motion_only:
                 log("motion-only mode: the virtual pad reports gyro/accelerometer "
                     "and leaves every button, stick and trigger neutral")
+            # Audio haptics ride on the virtual DualSense's audio endpoint, so they
+            # only make sense on the VIIPER backend; that device is what a game
+            # sends its haptics audio to.  Starting the engine only captures and
+            # writes to the physical pad -- the motion path is untouched.  The
+            # engine starts after the mapper exists, so this try/finally always
+            # owns its lifetime.
             mapper = self._make_mapper(kind, controller, pad)
+            engine = self._start_haptics(kind, controller)
             try:
                 # A DS4 relay renders the motion itself on a steady high-rate
                 # cadence, so start that before pumping input into it.
@@ -192,6 +249,9 @@ class Bridge:
                     mapper.start_streaming()
                 self.pump(kind, controller, mapper)
             finally:
+                if engine is not None:
+                    engine.stop()
+                    log("音频震动已停止")
                 if hasattr(mapper, "stop_streaming"):
                     mapper.stop_streaming()
                 if isinstance(pad, viiper.DualSensePad):
@@ -408,6 +468,16 @@ def build_parser() -> argparse.ArgumentParser:
                              "or dualsense (a real DualSense through the VIIPER "
                              "service; needed for games that only send audio haptics "
                              "to a DualSense).  dualsense needs a Switch Pro input")
+    haptics_group = parser.add_mutually_exclusive_group()
+    haptics_group.add_argument("--haptics", dest="haptics", action="store_true",
+                               default=None,
+                               help="turn audio haptics on for this run (default: whatever "
+                                    "the window's switch remembered).  Needs "
+                                    "--backend dualsense: the virtual DualSense's audio "
+                                    "endpoint is what carries the game's haptics audio")
+    haptics_group.add_argument("--no-haptics", dest="haptics", action="store_false",
+                               help="turn audio haptics off for this run, whatever the "
+                                    "remembered switch says")
     return parser
 
 
@@ -465,7 +535,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     bridge = Bridge(config, verbose=args.verbose, device_path=args.device,
                     source=args.source, no_virtual_pad=args.no_virtual_pad,
-                    backend=args.backend)
+                    backend=args.backend, haptics_enabled=args.haptics)
     try:
         return bridge.run()
     except KeyboardInterrupt:

@@ -57,6 +57,14 @@ FRAME_NAMES = {
     FRAME_MIC_INTERFACE_STATE: "mic-iface",
 }
 
+#: DualSense 触摸点的"未接触"标记：HID 里 bit7 = 1 表示没有手指。
+#:
+#: VIIPER 的 wire 把 ``touch1Active/touch2Active`` 定义成 u8，并要求调用方自己
+#: 把这个字节写进报文；发 0（看起来像"布尔 false"）会被主机当成"在 (0,0) 按着"，
+#: 也就是之前一直有个 0,0 触摸点的原因。发 0x80 才是"没有触摸"。
+TOUCH_INACTIVE = 0x80
+
+
 #: DualSense report units (VIIPER's own constants).
 DS5_GYRO_COUNTS_PER_DPS = 16.384
 DS5_ACCEL_COUNTS_PER_MS2 = 835.07
@@ -301,16 +309,42 @@ class DeviceStream:
 # --------------------------------------------------------------------------- #
 
 class _ReportShim:
-    """The ``pad.report.wTimestamp`` slot our mappers write to.
+    """A DualShock 4-shaped report the mappers can write field by field.
 
-    A DualSense input state carries no timestamp -- the host timestamps arrivals
-    -- so the value is accepted and ignored.
+    ``DS4ToDS4Relay`` does not call ``set_*`` at all: it writes
+    ``pad.report.wButtons`` / ``bThumbLX`` / ``wGyroX`` ... and then calls
+    ``submit()``, which is how a ViGEm pad is driven.  The DualSense sink has to
+    offer the same surface for that relay to work, so this mirrors the ViGEm
+    ``DS4_REPORT_EX`` fields (signed sensor values are stored the way Python sees
+    them: an int, possibly negative; :func:`_as_signed16` folds raw unsigned
+    writes too).  ``wTimestamp`` is accepted and ignored -- a DualSense input
+    state carries no timestamp.
     """
 
-    __slots__ = ("wTimestamp",)
+    __slots__ = ("wButtons", "bSpecial", "bThumbLX", "bThumbLY", "bThumbRX",
+                 "bThumbRY", "bTriggerL", "bTriggerR", "wTimestamp",
+                 "bBatteryLvl", "bBatteryLvlSpecial",
+                 "wGyroX", "wGyroY", "wGyroZ", "wAccelX", "wAccelY", "wAccelZ")
 
     def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.wButtons = 0x0008            # d-pad hat centred, nothing pressed
+        self.bSpecial = 0
+        self.bThumbLX = self.bThumbLY = self.bThumbRX = self.bThumbRY = 128
+        self.bTriggerL = self.bTriggerR = 0
         self.wTimestamp = 0
+        self.bBatteryLvl = 0x0B
+        self.bBatteryLvlSpecial = 0
+        self.wGyroX = self.wGyroY = self.wGyroZ = 0
+        self.wAccelX = self.wAccelY = self.wAccelZ = 0
+
+
+def _as_signed16(value) -> int:
+    """A sensor value as a signed 16-bit integer (accepts raw unsigned writes)."""
+    number = int(value) & 0xFFFF
+    return number - 0x10000 if number & 0x8000 else number
 
 
 class DualSensePad:
@@ -401,23 +435,39 @@ class DualSensePad:
             self.haptics_frames += 1
 
     # -- the pad API our mappers use -------------------------------------- #
+    #
+    # Every setter writes both the packed-state fields and the report shim, so a
+    # mapper can use either style: call these methods (Switch mapper), or write
+    # ``pad.report`` fields and call :meth:`submit` (DS4 relay).
 
     def set_sticks(self, lx: int, ly: int, rx: int, ry: int) -> None:
-        self._sticks = (lx, ly, rx, ry)
+        values = tuple(max(0, min(255, int(value))) for value in (lx, ly, rx, ry))
+        self._sticks = values
+        report = self.report
+        report.bThumbLX, report.bThumbLY, report.bThumbRX, report.bThumbRY = values
         self._dirty = True
 
     def set_triggers(self, left: int, right: int) -> None:
-        self._triggers = (left, right)
+        values = (max(0, min(255, int(left))), max(0, min(255, int(right))))
+        self._triggers = values
+        self.report.bTriggerL, self.report.bTriggerR = values
         self._dirty = True
 
     def set_buttons(self, buttons: int, special: int = 0) -> None:
-        self._buttons = buttons
-        self._special = special
+        self._buttons = int(buttons) & 0xFFFF
+        self._special = int(special) & 0xFF
+        self.report.wButtons = self._buttons
+        self.report.bSpecial = self._special
         self._dirty = True
 
     def set_motion(self, gyro, accel) -> None:
-        self._gyro = tuple(gyro)
-        self._accel = tuple(accel)
+        values = [int(round(value)) for value in tuple(gyro) + tuple(accel)]
+        clamped = [max(-32768, min(32767, value)) for value in values]
+        self._gyro = tuple(clamped[:3])
+        self._accel = tuple(clamped[3:])
+        report = self.report
+        report.wGyroX, report.wGyroY, report.wGyroZ = self._gyro
+        report.wAccelX, report.wAccelY, report.wAccelZ = self._accel
         self._dirty = True
 
     def set_battery(self, level: int, cable_connected: bool = False) -> None:
@@ -425,12 +475,26 @@ class DualSensePad:
         pass
 
     def set_battery_byte(self, value: int) -> None:
-        pass
+        # Kept so the DS4 relay works unchanged; the value is not part of the
+        # input state VIIPER carries.
+        self.report.bBatteryLvlSpecial = int(value) & 0xFF
 
     def submit(self) -> None:
+        """Push ``report`` into the packed state (this is the DS4 relay's path)."""
+        report = self.report
+        self._sticks = (report.bThumbLX, report.bThumbLY,
+                        report.bThumbRX, report.bThumbRY)
+        self._buttons = int(report.wButtons) & 0xFFFF
+        self._special = int(report.bSpecial) & 0xFF
+        self._triggers = (report.bTriggerL, report.bTriggerR)
+        self._gyro = tuple(_as_signed16(value) for value in
+                           (report.wGyroX, report.wGyroY, report.wGyroZ))
+        self._accel = tuple(_as_signed16(value) for value in
+                            (report.wAccelX, report.wAccelY, report.wAccelZ))
         self._dirty = True
 
     def reset(self) -> None:
+        self.report.reset()
         self._sticks = (128, 128, 128, 128)
         self._buttons = 0x0008
         self._special = 0
@@ -461,8 +525,9 @@ class DualSensePad:
             lx, ly, rx, ry,
             buttons & 0xFFFFFFFF,
             dpad, trigger_l, trigger_r,
-            0, 0, 0,                              # touch 1: x, y, active
-            0, 0, 0,                              # touch 2: x, y, active
+            # 两个触摸点一律"未接触"：坐标 0/0 + bit7，主机就不会看到手指。
+            0, 0, TOUCH_INACTIVE,
+            0, 0, TOUCH_INACTIVE,
             gyro[0], gyro[1], gyro[2],
             accel[0], accel[1], accel[2],
         )

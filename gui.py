@@ -27,6 +27,7 @@ from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 
 import dualshock4
+import haptics
 import hidwin  # noqa: F401  (kept so the module can report device details if needed)
 import mapping
 import paths
@@ -36,6 +37,7 @@ import ui_theme
 import switchpro
 import verify_plan
 import vigem
+import viiper
 
 BG = "#1e1f26"
 PANEL = "#282a36"
@@ -70,15 +72,80 @@ CONFIRM_NAME = "A"
 #: factor (1.0 = exactly what the physical pad reports, 0 = motion off).
 GAIN_MIN, GAIN_MAX, GAIN_STEP = 0.0, 5.0, 0.1
 
+#: Rumble slider steps, keyed like ``settings.HAPTICS_KEYS``.  The ranges live in
+#: ``settings.HAPTICS_RANGES`` so the window and the file agree on them.
+HAPTICS_STEPS = {
+    "gain": 0.05,
+    "sensitivity": 1.0,
+    "attack": 0.01,
+    "release": 10.0,
+    "dead_zone": 0.005,
+    "gamma": 0.05,
+    "split": 10.0,
+}
+
+#: One row per pair of sliders: (left key, left label, right key, right label).
+#: ``None`` on the right means "this one gets the whole row".
+HAPTICS_ROWS = (
+    ("sensitivity", "灵敏度", "attack", "起振"),
+    ("release", "拖尾", "dead_zone", "轻音过滤"),
+    ("gamma", "响应曲线", "split", "低频/高频分界"),
+)
+
+#: One short line under each label.  Kept to a handful of characters so it fits
+#: the label column; the full reasoning stays in the module docstrings.
+HAPTICS_HINTS = {
+    "gain": "整体力度",
+    "sensitivity": "越大越容易震",
+    "attack": "越大起振越快",
+    "release": "掉强度有多慢",
+    "dead_zone": "太轻就不震",
+    "gamma": "前段迟钝还是猛",
+    "split": "手感偏沉或偏脆",
+    "dual": "两个马达分工",
+}
+
+
+def format_haptics(key: str, value: float) -> str:
+    """How one rumble parameter reads in its value box."""
+    if key == "gain":
+        return f"{value * 100:.0f}%"
+    if key == "sensitivity":
+        return f"{value:.0f}"
+    if key == "release":
+        return f"{value:.0f}ms"                # already milliseconds
+    if key == "dead_zone":
+        return f"{value * 100:.1f}%"
+    if key == "gamma" or key == "attack":
+        return f"{value:.2f}"
+    return f"{value:.0f}Hz"                    # split
+
+
+def parse_haptics(key: str, text: str) -> float | None:
+    """Read a value box back into the parameter; ``None`` when it is not a number."""
+    cleaned = (text.strip().lower()
+               .replace("ms", "").replace("hz", "")
+               .replace("%", "").replace("％", ""))
+    try:
+        number = float(cleaned)
+    except ValueError:
+        return None
+    if key in ("gain", "dead_zone"):
+        number /= 100.0                        # shown as a percentage
+    return number
+
 #: Names shown in the input-source box.  Short forms: the long descriptions did
 #: not fit the narrower window and carried no information.
 SOURCE_LABELS = {"auto": "自动", "switch": "Switch Pro", "ds4": "DualShock4"}
 #: How the Share mapping reads in the note under the checkboxes.
 SHARE_NOTE = "Share（DualShock 4）/ -（Switch Pro）"
 
-#: The two forwarding modes are mutually exclusive.  "genshin" is still reachable
-#: from the command line (--mode genshin) but no longer has an on-screen button.
-MODE_OFF, MODE_FULL, MODE_MOTION, MODE_GENSHIN = "off", "full", "motion", "genshin"
+#: The forwarding modes are mutually exclusive.  "genshin" is still reachable
+#: from the command line (--mode genshin) but no longer has an on-screen button;
+#: "ds5" forwards the same buttons/sticks/motion as "full", only onto a virtual
+#: DualSense (through VIIPER) instead of a DualShock 4.
+MODE_OFF, MODE_FULL, MODE_MOTION, MODE_GENSHIN, MODE_DS5 = (
+    "off", "full", "motion", "genshin", "ds5")
 #: Colour of an inactive flat button (also used as the slider grip colour).
 BUTTON_OFF = "#3b3f52"
 
@@ -154,10 +221,14 @@ def apply_window_icon(root: tk.Tk) -> None:
 class ControllerWorker(threading.Thread):
     """Reads the controller and optionally mirrors it onto a virtual DS4."""
 
-    def __init__(self, config: mapping.MappingConfig, source: str = "auto"):
+    def __init__(self, config: mapping.MappingConfig, source: str = "auto",
+                 backend: str = "vigem"):
         super().__init__(daemon=True)
         self.config = config
         self.source = source
+        #: Which virtual pad the forwarding mode creates: "vigem" (DualShock 4) or
+        #: "dualsense" (a real DualSense through VIIPER).
+        self.backend = backend if backend in ("vigem", "dualsense") else "vigem"
         self.states: queue.Queue = queue.Queue(maxsize=2)
         self.controller = None
         self.kind = "switch"
@@ -166,10 +237,11 @@ class ControllerWorker(threading.Thread):
         self.forwarding = False
         self.error: str | None = None
         self._client: vigem.ViGEmClient | None = None
-        self._pad: vigem.DS4Controller | None = None
+        self._pad = None
         self._mapper = None
-        self._stop = threading.Event()
+        self._halt = threading.Event()
         self._want_forward = False
+        self._backend_changed = False
         self._lock = threading.Lock()
 
     # -- commands from the UI --------------------------------------------- #
@@ -178,9 +250,24 @@ class ControllerWorker(threading.Thread):
         with self._lock:
             self._want_forward = enabled
 
+    def set_backend(self, backend: str) -> None:
+        """Switch between the DualShock 4 and DualSense sinks.
+
+        The pump thread does the actual teardown/rebuild: touching the pad from the
+        UI thread while a report is being submitted is how you get a half-written
+        report.
+        """
+        if backend not in ("vigem", "dualsense"):
+            return
+        with self._lock:
+            if backend == self.backend:
+                return
+            self.backend = backend
+            self._backend_changed = True
+
     def stop(self) -> None:
         """Ask the worker to finish; it tears the virtual pad down on the way out."""
-        self._stop.set()
+        self._halt.set()
 
     # -- forwarding plumbing ---------------------------------------------- #
 
@@ -188,10 +275,16 @@ class ControllerWorker(threading.Thread):
         if self._pad is not None or self.controller is None:
             return
         try:
-            self._client = vigem.ViGEmClient()
-            self._client.connect()
-            self._pad = self._client.create_ds4()
-            self._pad.plug_in()
+            if self.backend == "dualsense":
+                self.status = "正在准备虚拟 DualSense（VIIPER）…"
+                self._ensure_viiper()
+                pad = viiper.DualSensePad(log=lambda message: None)
+            else:
+                self._client = vigem.ViGEmClient()
+                self._client.connect()
+                pad = self._client.create_ds4()
+            self._pad = pad
+            pad.plug_in()
             if self.kind == "ds4":
                 self._mapper = mapping.DS4ToDS4Relay(self.controller, self._pad, self.config)
             else:
@@ -200,10 +293,29 @@ class ControllerWorker(threading.Thread):
             if hasattr(self._mapper, "start_streaming"):
                 self._mapper.start_streaming()
             self.forwarding = True
-            self.status = "已开启转发：虚拟 DualShock 4 已插入"
+            self.status = ("已开启转发：虚拟 DualSense 已插入（VIIPER）"
+                           if self.backend == "dualsense"
+                           else "已开启转发：虚拟 DualShock 4 已插入")
         except Exception as exc:  # pragma: no cover - depends on the host
             self._teardown_forwarding()
             self.status = f"转发失败：{exc}"
+
+    def _ensure_viiper(self) -> None:
+        """Make sure the VIIPER service is up before creating the DualSense.
+
+        Same helper the rumble endpoint uses, so a user who never started VIIPER
+        by hand still gets a working pad (and if it cannot start, the failure lands
+        in ``status`` instead of a traceback).
+        """
+        if haptics.viiper_port_open():
+            return
+        self.status = "正在启动 VIIPER 服务…"
+        exe = haptics.find_server_exe()
+        if exe is None:
+            raise RuntimeError("没找到 VIIPER-*.exe，无法启动虚拟 DualSense 服务")
+        haptics.launch_viiper_server(exe)
+        if not haptics.wait_for_viiper(20.0):
+            raise RuntimeError("VIIPER 服务没有起来（端口 3242 无响应）")
 
     def _teardown_forwarding(self) -> None:
         self.forwarding = False
@@ -229,7 +341,7 @@ class ControllerWorker(threading.Thread):
     # -- main loop -------------------------------------------------------- #
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             try:
                 self._connect()
                 self._pump()
@@ -257,7 +369,7 @@ class ControllerWorker(threading.Thread):
                     except Exception:
                         pass
                     self.controller = None
-            if self._stop.is_set():
+            if self._halt.is_set():
                 break
             time.sleep(1.5)
 
@@ -275,12 +387,17 @@ class ControllerWorker(threading.Thread):
                            f"体感标定 {controller.imu_calibration.source}")
 
     def _pump(self) -> None:
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             state = self.controller.read_state(timeout_ms=200)
             if state is None:
                 continue
             with self._lock:
                 want_forward = self._want_forward
+                backend_changed = self._backend_changed
+                self._backend_changed = False
+            if backend_changed and self._pad is not None:
+                # The sink changed while a pad was up: rebuild it in this thread.
+                self._teardown_forwarding()
             if want_forward and self._pad is None:
                 self._start_forwarding()
             elif not want_forward and self._pad is not None:
@@ -326,28 +443,33 @@ class DemoWorker(threading.Thread):
         ("Down", (0, 0, 0x01)), ("Left", (0, 0, 0x08)),
     ]
 
-    def __init__(self, config: mapping.MappingConfig, source: str = "auto"):
+    def __init__(self, config: mapping.MappingConfig, source: str = "auto",
+                 backend: str = "vigem"):
         super().__init__(daemon=True)
         self.config = config
         self.source = source          # accepted so the UI can swap workers freely
+        self.backend = backend
         self.states: queue.Queue = queue.Queue(maxsize=2)
         self.controller = DemoController()
         self.status = "演示模式：没有读取真实手柄"
         self.connected = True
         self.forwarding = False
-        self._stop = threading.Event()
+        self._halt = threading.Event()
         self._start = time.monotonic()
 
     def set_forwarding(self, enabled: bool) -> None:
         self.status = "演示模式不支持转发"
 
+    def set_backend(self, backend: str) -> None:
+        self.backend = backend if backend in ("vigem", "dualsense") else "vigem"
+
     def stop(self) -> None:
         """Ask the demo worker to finish (the App calls this on every worker)."""
-        self._stop.set()
+        self._halt.set()
 
     def run(self) -> None:
         index = 0
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             elapsed = time.monotonic() - self._start
             name, buttons = self.BUTTON_CYCLE[index % len(self.BUTTON_CYCLE)]
             index = int(elapsed / 0.6)
@@ -408,7 +530,22 @@ class App:
         #: Input source to restore when the Genshin mode (command line only) is off.
         self._source_before_genshin: str | None = None
 
+        # Audio haptics: one worker thread owns the slow part (creating the audio
+        # endpoint can take a few seconds, and a Bluetooth pad write can take 20 ms,
+        # so neither may ever happen on the UI thread).
+        self.haptics_runner = haptics.HapticsRunner()
+        #: Identity of the controller the current rumble request points at; a
+        #: reconnect produces a new object, which is what makes the runner restart.
+        self._haptics_key: tuple | None = None
+        self._haptics_error: str | None = None
+
         self._build_layout()
+        # Hand the remembered sliders to the runner before anything can start, so
+        # the first engine it creates already has the user's values.
+        try:
+            self.haptics_runner.set_tuning(self.haptics_values)
+        except Exception:
+            pass
         self.worker = (DemoWorker(self.config) if demo
                        else ControllerWorker(self.config, source=self.source))
         self.worker.start()
@@ -487,7 +624,8 @@ class App:
         label_column = int(max(label_font.measure(text) for text in (
             "虚拟手柄只转发体感（按键留给实体手柄）",
             "完整转发到虚拟 DualShock 4", "输入手柄", "体感灵敏度",
-            "× 与 ○ 互换，□ 与 △ 互换", "死区补偿 · 俯仰")) + px(20))
+            "× 与 ○ 互换，□ 与 △ 互换", "死区补偿 · 俯仰",
+            "开启震动", "震动强度", "低频/高频分界")) + px(20))
 
         def section(title: str, top: int = ui_theme.SPACE_MD) -> tk.Frame:
             """A titled card; rows go inside the returned frame."""
@@ -498,19 +636,49 @@ class App:
             card.pack(fill="x")
             return card.content
 
-        def row(parent: tk.Frame, label: str | None, first: bool = False) -> tk.Frame:
-            """One row inside a section card, with a hairline above it."""
+        def label_cell(parent: tk.Frame, text: str, hint: str | None = None,
+                       padx: int = 0) -> None:
+            """A label, optionally with a muted one-liner underneath.
+
+            Without a hint the label fills the row so Tk keeps the text vertically
+            centred -- the look every other card has.  With a hint the two lines
+            stack from the top, which is what the rumble card needs.
+            """
+            if not hint:
+                tk.Label(parent, text=text, bg=ui_theme.SURFACE, fg=ui_theme.TEXT,
+                         font=label_font, anchor="w").pack(
+                             side="left", fill="y", padx=(padx, 0))
+                return
+            column = tk.Frame(parent, bg=ui_theme.SURFACE)
+            column.pack(side="left", fill="y", padx=(padx, 0), pady=(px(3), 0))
+            tk.Label(column, text=text, bg=ui_theme.SURFACE, fg=ui_theme.TEXT,
+                     font=label_font, anchor="w").pack(side="top", anchor="w")
+            tk.Label(column, text=hint, bg=ui_theme.SURFACE,
+                     fg=ui_theme.TEXT_MUTED, font=small_font, anchor="w").pack(
+                         side="top", anchor="w")
+
+        def row(parent: tk.Frame, label: str | None, first: bool = False,
+                hint: str | None = None) -> tk.Frame:
+            """One row inside a section card, with a hairline above it.
+
+            ``hint`` adds a second, muted line under the label: the parameters in
+            the rumble card are not self-explanatory, and a one-line note beats a
+            tooltip nobody hovers over.
+            """
             if not first:
                 tk.Frame(parent, bg=ui_theme.BORDER, height=max(1, px(1))).pack(fill="x")
-            inside = tk.Frame(parent, bg=ui_theme.SURFACE, height=int(34 * self.scale))
+            # A row with a hint needs two text lines: give it six logical pixels
+            # more, otherwise Tk squeezes the muted second line to a sliver.
+            row_height = 40 if hint else 34
+            inside = tk.Frame(parent, bg=ui_theme.SURFACE,
+                              height=int(row_height * self.scale))
             inside.pack(fill="x")
             inside.pack_propagate(False)
             if label is not None:
                 holder = tk.Frame(inside, bg=ui_theme.SURFACE, width=label_column)
                 holder.pack(side="left", fill="y")
                 holder.pack_propagate(False)
-                tk.Label(holder, text=label, bg=ui_theme.SURFACE, fg=ui_theme.TEXT,
-                         font=label_font, anchor="w").pack(side="left", fill="y")
+                label_cell(holder, label, hint)
             return inside
 
         # -- output mode ------------------------------------------------------ #
@@ -537,6 +705,15 @@ class App:
             scale=self.scale)
         self.motion_check.pack(side="right")
 
+        # Same payload as "full", but the virtual pad is a real DualSense (VIIPER)
+        # instead of a DualShock 4 -- that is what games reading DualSense-only
+        # features (native haptics, adaptive triggers) need.
+        self.ds5_var = tk.BooleanVar(value=False)
+        ds5_row = row(mode_card, "转发到虚拟 DualSense 手柄")
+        self.ds5_check = ui_theme.ToggleSwitch(
+            ds5_row, self.ds5_var, command=self.toggle_ds5, scale=self.scale)
+        self.ds5_check.pack(side="right")
+
         # The virtual pad's face buttons can be exchanged without touching the
         # controller, so a pad laid out one way still fits a game that expects the
         # other.  Independent of the forwarding mode above.
@@ -548,7 +725,7 @@ class App:
         self.swap_face_check.pack(side="right")
 
         self.share_note = tk.Label(
-            footer, text=f"两种模式都会把 {SHARE_NOTE} 用作触控板按下",
+            footer, text=f"三种模式都会把 {SHARE_NOTE} 用作触控板按下",
             bg=page, fg=ui_theme.TEXT_MUTED, font=small_font, anchor="w")
         self.share_note.pack(fill="x", padx=px(2), pady=(px(ui_theme.SPACE_XS), 0))
 
@@ -588,6 +765,63 @@ class App:
             self.deadzone_scales[axis] = scale
             self.deadzone_entries[axis] = entry
             self._set_deadzone_entry(axis, float(self.deadzone[index]))
+
+        # -- audio haptics ---------------------------------------------------- #
+        # 开关 + 七个滑块（强度 / 灵敏度 / 起振 / 拖尾 / 轻音过滤 / 响应曲线 /
+        # 频段分界）。原来的预设下拉去掉了：那些预设本质上就是这几组数的组合，
+        # 直接让人拖更直观。每个参数下面一行小字说明它是干什么的。
+        haptics_card = section("PS5手柄原生震动")
+        self.haptics_values = settings.haptics_tuning()
+        self.haptics_vars: dict[str, tk.DoubleVar] = {}
+        self.haptics_entries: dict[str, ui_theme.ValueBox] = {}
+        self.haptics_scales: dict[str, ui_theme.DiamondSlider] = {}
+
+        self.haptics_var = tk.BooleanVar(value=settings.haptics_enabled())
+        master_row = row(haptics_card, "开启震动", first=True)
+        self.haptics_check = ui_theme.ToggleSwitch(
+            master_row, self.haptics_var, command=self.toggle_haptics,
+            scale=self.scale)
+        self.haptics_check.pack(side="right")
+
+        # 强度那一行右边留给"左右分工"（它是开关，不是滑块）。
+        gain_row = row(haptics_card, "震动强度", hint=HAPTICS_HINTS["gain"])
+        self._add_haptics_slider(gain_row, "gain")
+        self.haptics_dual_var = tk.BooleanVar(value=self.haptics_values["dual"])
+        self.haptics_dual_check = ui_theme.ToggleSwitch(
+            gain_row, self.haptics_dual_var, command=self.toggle_haptics_dual,
+            scale=self.scale)
+        self.haptics_dual_check.pack(side="right", padx=(0, px(2)))
+        dual_note = tk.Frame(gain_row, bg=ui_theme.SURFACE)
+        dual_note.pack(side="right", padx=(px(14), px(10)))
+        tk.Label(dual_note, text="左右分工", bg=ui_theme.SURFACE, fg=ui_theme.TEXT,
+                 font=label_font, anchor="e").pack(anchor="e")
+        tk.Label(dual_note, text=HAPTICS_HINTS["dual"], bg=ui_theme.SURFACE,
+                 fg=ui_theme.TEXT_MUTED, font=small_font, anchor="e").pack(anchor="e")
+
+        for left_key, left_label, right_key, right_label in HAPTICS_ROWS:
+            inside = row(haptics_card, left_label, hint=HAPTICS_HINTS[left_key])
+            self._add_haptics_slider(inside, left_key)
+            if right_key is not None:
+                # 右边这个参数同样要一行说明：它挤在左侧标签栏之外，所以自己
+                # 带一个标签列（标签 + 小字），和左边保持同样的两行结构。
+                right_holder = tk.Frame(inside, bg=ui_theme.SURFACE)
+                right_holder.pack(side="left", fill="y", padx=(px(14), px(6)))
+                label_cell(right_holder, right_label, HAPTICS_HINTS[right_key])
+                self._add_haptics_slider(inside, right_key)
+
+        # 状态提示 + 一键恢复默认（默认就是原来「低频沉浸」那一档）。
+        note_row = tk.Frame(footer, bg=page)
+        note_row.pack(fill="x", padx=px(2), pady=(px(ui_theme.SPACE_XS), 0))
+        self.haptics_note = tk.Label(
+            note_row, text="", bg=page, fg=ui_theme.TEXT_MUTED, font=small_font,
+            anchor="w", justify="left", wraplength=px(800))
+        self.haptics_note.pack(side="left", fill="x", expand=True)
+        self.haptics_reset = tk.Label(
+            note_row, text="恢复默认", bg=page, fg=ui_theme.ACCENT_DIM,
+            font=small_font, cursor="hand2")
+        self.haptics_reset.pack(side="right", padx=(px(10), 0))
+        self.haptics_reset.bind("<Button-1>", self.reset_haptics_defaults)
+        self._update_haptics_note()
 
     # -- controls --------------------------------------------------------- #
 
@@ -652,26 +886,185 @@ class App:
         self._apply_gain(value)
         self._remember_gain()
 
+    # -- audio haptics ----------------------------------------------------- #
+
+    def toggle_haptics(self) -> None:
+        """主开关：开 → 先确保音频端点、有手柄再起引擎；关 → 停引擎并拆自己建的设备。"""
+        enabled = settings.set_haptics_enabled(self.haptics_var.get())
+        self._haptics_error = None
+        if not enabled:
+            self._haptics_key = None
+            self.haptics_runner.request_off()
+        else:
+            self._sync_haptics()
+        self._update_haptics_note()
+
+    def _sync_haptics(self) -> None:
+        """Tell the runner what the switch and the current controller call for.
+
+        Never blocks: the runner thread does the slow part.  Three states, and
+        only the endpoint's lifetime changes between them (it belongs to the
+        runner, so a disconnect never removes the virtual sound card):
+
+        * switch off                     -> ``request_off`` (stop + release);
+        * switch on, no usable pad       -> ``prepare`` (endpoint only, wait);
+        * switch on, pad usable          -> ``request`` (endpoint + engine).
+
+        A reconnect hands the worker a brand-new controller object, so the
+        identity kept in ``_haptics_key`` is also what makes the engine come back
+        on the new handle instead of writing into a dead one.
+        """
+        controller = getattr(self.worker, "controller", None)
+        transport = getattr(controller, "transport", None)
+        kind = getattr(self.worker, "kind", None)
+        usable = (self.haptics_var.get() and controller is not None
+                  and kind is not None and transport in ("usb", "bluetooth")
+                  # A closed handle means the worker is tearing this controller
+                  # down; wait for the reconnect instead of writing into it.
+                  and bool(getattr(controller, "is_open", True)))
+        if not self.haptics_var.get():
+            key = None
+        elif usable:
+            # Keep the controller *object* (not its id): it pins the identity, so a
+            # reconnect always produces a different key even if CPython reuses an
+            # id, and the engine is restarted on the new session.
+            key = (controller, transport)
+        else:
+            key = ("prepare",)
+        if key == self._haptics_key:
+            return
+        self._haptics_key = key
+        if key is None:
+            self.haptics_runner.request_off()
+            return
+        if key == ("prepare",):
+            self.haptics_runner.prepare()
+            return
+        try:
+            pad_kind = haptics.pad_kind(kind)
+        except haptics.HapticsError:
+            self._haptics_key = None
+            self.haptics_runner.prepare()
+            return
+        # 不把手柄句柄交给引擎：震动自己开一个句柄，手柄拔掉时工作线程关它自己
+        # 那个句柄，就不会和震动写入撞在同一个 handle 上（那会直接崩）。
+        self.haptics_runner.request(pad_kind, transport)
+
+    # -- 六个滑块 ---------------------------------------------------------- #
+
+    def _add_haptics_slider(self, parent: tk.Frame, key: str) -> None:
+        """One value box + slider, wired to ``haptics_values[key]``."""
+        px = self._px
+        low, high = settings.HAPTICS_RANGES[key]
+        var = tk.DoubleVar(value=float(self.haptics_values[key]))
+        entry = ui_theme.ValueBox(parent, scale=self.scale)
+        entry.pack(side="left", pady=px(4), padx=(px(2), 0))
+        entry.bind("<Return>", lambda _event, name=key: self._on_haptics_entry(name))
+        entry.bind("<FocusOut>",
+                   lambda _event, name=key: self._on_haptics_entry(name))
+        slider = ui_theme.DiamondSlider(
+            parent, var, from_=low, to=high, step=HAPTICS_STEPS[key],
+            command=lambda _value, name=key: self._on_haptics_scale(name),
+            scale=self.scale)
+        # A canvas defaults to a wide request; two per row would then squeeze the
+        # right-hand one to nothing.  A small request plus expand shares evenly.
+        slider.configure(width=px(110))
+        slider.pack(side="left", fill="x", expand=True, padx=(px(10), px(8)))
+        slider.bind("<ButtonRelease-1>", lambda _event: self._remember_haptics())
+        self.haptics_vars[key] = var
+        self.haptics_entries[key] = entry
+        self.haptics_scales[key] = slider
+        self._set_haptics_entry(key, float(self.haptics_values[key]))
+
+    def _set_haptics_entry(self, key: str, value: float) -> None:
+        entry = self.haptics_entries[key]
+        entry.delete(0, "end")
+        entry.insert(0, format_haptics(key, value))
+
+    def _apply_haptics_value(self, key: str, value: float) -> None:
+        """Clamp one parameter, show it, hand it to the engine."""
+        clamped = settings.clamp_haptics(key, value)
+        self.haptics_values[key] = clamped
+        var = self.haptics_vars[key]
+        if abs(float(var.get()) - clamped) > 1e-9:
+            var.set(clamped)                    # redraws the knob, no callback
+        self._set_haptics_entry(key, clamped)
+        self.haptics_runner.set_value(key, clamped)
+
+    def _on_haptics_scale(self, key: str) -> None:
+        self._apply_haptics_value(key, float(self.haptics_scales[key].get()))
+
+    def _on_haptics_entry(self, key: str) -> None:
+        parsed = parse_haptics(key, self.haptics_entries[key].get())
+        if parsed is None:                      # garbage: put the old value back
+            self._set_haptics_entry(key, float(self.haptics_values[key]))
+            return
+        self._apply_haptics_value(key, parsed)
+        self._remember_haptics()
+
+    def toggle_haptics_dual(self) -> None:
+        dual = bool(self.haptics_dual_var.get())
+        self.haptics_values["dual"] = dual
+        self.haptics_runner.set_value("dual", dual)
+        self._remember_haptics()
+
+    def reset_haptics_defaults(self, _event=None) -> None:
+        """Restore the six sliders (and the dual switch) to the shipped defaults."""
+        defaults = dict(haptics.DEFAULT_TUNING)
+        for key in settings.HAPTICS_KEYS:
+            self._apply_haptics_value(key, defaults[key])
+        self.haptics_dual_var.set(defaults["dual"])
+        self.haptics_values["dual"] = defaults["dual"]
+        self.haptics_runner.set_value("dual", defaults["dual"])
+        self._remember_haptics()
+        self._update_haptics_note()
+
+    def _remember_haptics(self, _event=None) -> None:
+        """Remember the six numbers, the two switches and the master switch."""
+        settings.save_haptics_tuning(self.haptics_values)
+        settings.set_haptics_enabled(self.haptics_var.get())
+
+    def _update_haptics_note(self) -> None:
+        """One line: endpoint + live levels, or why the switch went back off."""
+        runner = self.haptics_runner
+        if not self.haptics_var.get():
+            if self._haptics_error:
+                text = f"PS5手柄原生震动没起来：{self._haptics_error}"
+            elif runner.running:
+                text = "PS5手柄原生震动：正在停止…"
+            else:
+                text = "PS5手柄原生震动：关闭（打开后会自动准备虚拟音频端点）"
+        else:
+            text = runner.status
+            if runner.running:
+                left, right = runner.levels()
+                text = f"{text}  ·  L {left:.2f} / R {right:.2f}"
+        if str(self.haptics_note.cget("text")) != text:
+            self.haptics_note.configure(text=text)
+
 
     def apply_mode(self, mode: str) -> None:
         """The single place that changes the forwarding mode.
 
-        Two mutually exclusive modes, and both of them include the Share mapping
-        (Share on a DualShock 4, ``-`` on a Switch Pro becomes the touchpad click),
-        because the pad's own touchpad button is unreliable over Bluetooth.
+        Three mutually exclusive modes (DualShock 4 full, motion-only, DualSense
+        full), all of them including the Share mapping (Share on a DualShock 4,
+        ``-`` on a Switch Pro becomes the touchpad click), because the pad's own
+        touchpad button is unreliable over Bluetooth.
         """
-        if mode not in (MODE_OFF, MODE_FULL, MODE_MOTION, MODE_GENSHIN):
+        if mode not in (MODE_OFF, MODE_FULL, MODE_MOTION, MODE_GENSHIN, MODE_DS5):
             mode = MODE_OFF
         genshin = mode == MODE_GENSHIN
         self.mode = mode
+        # "ds5" forwards everything, just onto a DualSense instead of a DualShock 4.
         self.config.motion_only = mode in (MODE_MOTION, MODE_GENSHIN)
-        # Share → touchpad is part of both modes now; off only when nothing is
-        # forwarded at all.
+        # Share → touchpad is part of every forwarding mode; off only when nothing
+        # is forwarded at all.
         self.config.share_as_touchpad = mode != MODE_OFF
 
         # Keep the widgets in step; set() does not re-trigger the commands.
         self.forward_var.set(mode == MODE_FULL)
         self.motion_only_var.set(mode == MODE_MOTION)
+        self.ds5_var.set(mode == MODE_DS5)
 
         if genshin:
             # Only reachable from the command line now, but it still pins the input
@@ -686,9 +1079,17 @@ class App:
             self.source_var.set(SOURCE_LABELS.get(restore, SOURCE_LABELS["auto"]))
             self._switch_source(restore)
 
+        self._set_backend("dualsense" if mode == MODE_DS5 else "vigem")
         self._set_forwarding(mode != MODE_OFF)
         self._update_mode_hint()
         self._remember_mode()
+
+    def _set_backend(self, backend: str) -> None:
+        """Which virtual pad the worker should create (it rebuilds it itself)."""
+        try:
+            self.worker.set_backend(backend)
+        except Exception:                            # pragma: no cover - defensive
+            pass
 
     def _remember_mode(self) -> None:
         """Remember which checkbox was ticked, so the next start restores it."""
@@ -704,10 +1105,14 @@ class App:
         share_note = "；Share / - 当作触控板按下" if self.config.share_as_touchpad else ""
         texts = {
             MODE_OFF: "当前不转发，只显示实时数值。",
-            MODE_FULL: "完整转发：按键、摇杆、体感都会转发到虚拟手柄" + share_note + "。",
-            MODE_MOTION: "仅体感：虚拟手柄只发体感，按键摇杆由实体手柄负责" + share_note + "。",
+            MODE_FULL: "完整转发：按键、摇杆、体感都会转发到虚拟 DualShock 4"
+                       + share_note + "。",
+            MODE_MOTION: "仅体感：虚拟手柄只发体感，按键摇杆由实体手柄负责"
+                         + share_note + "。",
             MODE_GENSHIN: "仅体感 + 输入固定为 DualShock 4（命令行 --mode genshin 专用）"
                           + share_note + "。",
+            MODE_DS5: "转发到虚拟 DualSense：按键、摇杆、体感都会转发到虚拟 "
+                      "DualSense（VIIPER）" + share_note + "。",
         }
         self.worker_label.configure(text=texts.get(self.mode, ""))
 
@@ -732,16 +1137,19 @@ class App:
         if chosen == getattr(self.worker, "source", None):
             return False
         previous = self.worker
+        backend = getattr(previous, "backend", "vigem")
         try:
             previous.stop()
             previous.join(timeout=2.0)
         except Exception:
             pass
-        self.worker = (DemoWorker(self.config, source=chosen)
+        self.worker = (DemoWorker(self.config, source=chosen, backend=backend)
                        if isinstance(previous, DemoWorker)
-                       else ControllerWorker(self.config, source=chosen))
+                       else ControllerWorker(self.config, source=chosen,
+                                             backend=backend))
         self.worker.start()
         if self.mode != MODE_OFF:
+            self._set_backend("dualsense" if self.mode == MODE_DS5 else "vigem")
             self._set_forwarding(True)
         return True
 
@@ -751,6 +1159,10 @@ class App:
     def toggle_motion_only(self) -> None:
         """Checkbox 2: motion only, so the physical pad keeps buttons and sticks."""
         self.apply_mode(MODE_MOTION if self.motion_only_var.get() else MODE_OFF)
+
+    def toggle_ds5(self) -> None:
+        """Checkbox 3: forward everything, but onto a virtual DualSense."""
+        self.apply_mode(MODE_DS5 if self.ds5_var.get() else MODE_OFF)
 
     def toggle_swap_face_buttons(self) -> None:
         """Exchange ✕↔○ and □↔△ on the virtual pad, and remember the choice.
@@ -833,6 +1245,19 @@ class App:
             text="转发：开启" if self.worker.forwarding else "转发：关闭",
             fg=(OK if self.worker.forwarding else DIM))
         self._update_pulse()
+        if self.haptics_runner.failed:
+            # The endpoint could not be created (VIIPER down, driver missing...).
+            # Never leave the switch sitting in "on" over a feature that is not
+            # running: pop it back and say why in the note under the card.
+            self.haptics_runner.failed = False
+            self.haptics_var.set(False)
+            settings.set_haptics_enabled(False)
+            self._haptics_key = None
+            self._haptics_error = self.haptics_runner.error or "音频通道创建失败"
+        # The virtual sound card is owned by the rumble switch alone: turning the
+        # virtual DualSense (or any forwarding mode) on and off must not touch it.
+        self._sync_haptics()
+        self._update_haptics_note()
         self._tick_id = self.root.after(16, self._tick)
 
     def _update_live_text(self, controller, state) -> None:
@@ -902,6 +1327,16 @@ class App:
         except Exception:
             pass
         try:
+            self._remember_haptics()
+        except Exception:
+            pass
+        # Stop the rumble engine before the worker closes the pad handle it borrows,
+        # so the last packet the pad ever gets is a silence packet.
+        try:
+            self.haptics_runner.stop()
+        except Exception:
+            pass
+        try:
             self.worker.stop()
         except Exception:
             pass
@@ -941,10 +1376,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="窗口保持最前（边看提示边按手柄时更方便）")
     parser.add_argument("--source", choices=sources.KINDS, default="auto",
                         help="输入手柄：自动 / Switch Pro / DualShock 4（有线或蓝牙）")
-    parser.add_argument("--mode", choices=(MODE_OFF, MODE_FULL, MODE_MOTION, MODE_GENSHIN),
+    parser.add_argument("--mode", choices=(MODE_OFF, MODE_FULL, MODE_MOTION,
+                                           MODE_GENSHIN, MODE_DS5),
                         default=MODE_OFF,
                         help="启动时即进入某个转发模式：full 整机转发 / motion 仅体感 / "
-                             "genshin 原神推荐（DS4 仅体感 + Share 当触控板）/ off 只显示数值")
+                             "ds5 整机转发到虚拟 DualSense / genshin 原神推荐"
+                             "（DS4 仅体感 + Share 当触控板）/ off 只显示数值")
     parser.add_argument("--debug-layout", action="store_true",
                         help="打印各面板尺寸（默认 1.2 秒后打印并退出）")
     parser.add_argument("--metrics-delay", type=float, default=1.2,
@@ -964,9 +1401,12 @@ def main(argv: list[str] | None = None) -> int:
     # drawn natively, rather than a 100% window bit-stretched by Windows (which
     # softens every glyph and re-resamples every anti-aliased edge).  The
     # --debug-layout report below prints req/alloc widths so clipping is
-    # verifiable without eyeballing pixels.
+    # verifiable without eyeballing pixels.  The height covers the four cards
+    # (the audio-haptics one grew when the preset dropdown became six sliders)
+    # plus a couple of lines of slack for the note under the last card, which
+    # wraps when it has to explain a failure.
     scale = max(1.0, root.winfo_fpixels("1i") / 96.0)
-    width, height = int(800 * scale), int(600 * scale)
+    width, height = int(800 * scale), int(880 * scale)
     if args.debug_layout:
         print(f"screen = {root.winfo_screenwidth()}x{root.winfo_screenheight()}  "
               f"dpi scale = {root.winfo_fpixels('1i') / 96.0:.3f}  "
@@ -975,7 +1415,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"report  = {paths.app_path('verification_report.json')}", flush=True)
         print(f"fixes   = {mapping.captured_mapping_path()}", flush=True)
     root.geometry(f"{width}x{height}+40+40")
-    root.minsize(int(760 * scale), int(564 * scale))
+    # Never smaller than the layout needs: below this the sliders and the note line
+    # under the last card start to clip (the cards are a fixed height).
+    root.minsize(int(768 * scale), int(880 * scale))
 
     app = App(root, forward=args.forward, demo=args.demo, topmost=args.topmost,
               scale=scale, source=args.source)

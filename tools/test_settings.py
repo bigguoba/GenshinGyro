@@ -66,9 +66,13 @@ def main() -> int:
         check("读回 3.5", settings.gyro_gain(path), 3.5)
         with open(path, encoding="utf-8") as handle:
             stored = json.load(handle)
-        check("文件里有全部记忆项（含三个死区、勾选框与键位互换）",
+        check("文件里有全部记忆项（三个死区、勾选框、键位互换与十项震动）",
               sorted(stored), ["deadzone_pitch", "deadzone_roll", "deadzone_yaw",
-                              "gyro_gain", "mode", "swap_face_buttons"])
+                              "gyro_gain", "haptics_attack", "haptics_dead_zone",
+                              "haptics_dual_motor", "haptics_enabled",
+                              "haptics_gain", "haptics_gamma", "haptics_motor_swap",
+                              "haptics_release_ms", "haptics_sensitivity",
+                              "haptics_split", "mode", "swap_face_buttons"])
         check("文件里存的就是 3.5", stored["gyro_gain"], 3.5)
 
         print("\n[2] 精度与范围")
@@ -128,9 +132,12 @@ def main() -> int:
               settings.motion_deadzone(path), (0.0, 0.0, 1.1))
         with open(path, encoding="utf-8") as handle:
             keys = sorted(json.load(handle))
-        check("六个记忆项都在同一个文件里",
+        check("十六个记忆项都在同一个文件里",
               keys, ["deadzone_pitch", "deadzone_roll", "deadzone_yaw", "gyro_gain",
-                     "mode", "swap_face_buttons"])
+                     "haptics_attack", "haptics_dead_zone", "haptics_dual_motor",
+                     "haptics_enabled", "haptics_gain", "haptics_gamma",
+                     "haptics_motor_swap", "haptics_release_ms", "haptics_sensitivity",
+                     "haptics_split", "mode", "swap_face_buttons"])
 
         print("\n[3d] 勾选框状态（mode）")
         check("默认 off", settings.mode(path), "off")
@@ -141,6 +148,10 @@ def main() -> int:
         check("非法 mode 回退 off", settings.set_mode("nonsense", path), "off")
         settings.set_mode("full", path)
         check("full 可以存", settings.mode(path), "full")
+        check("ds5 可以存（虚拟 DualSense 转发）",
+              settings.set_mode("ds5", path), "ds5")
+        check("ds5 读回", settings.mode(path), "ds5")
+        settings.set_mode("full", path)          # 后面的用例按 full 继续
 
         print("\n[3e] 键位互换（swap_face_buttons）")
         check("默认关", settings.swap_face_buttons(path), False)
@@ -153,6 +164,29 @@ def main() -> int:
         check("乱写回退关闭", settings.clamp_flag("乱写"), False)
         check("写回 False", settings.set_swap_face_buttons(False, path), False)
         check("读回 False", settings.swap_face_buttons(path), False)
+
+        print("\n[3f] 音频震动（开关 + 六个滑块 + 左右分工）")
+        check("默认关", settings.haptics_enabled(path), False)
+        tuning = settings.haptics_tuning(path)
+        check("默认强度 100%", tuning["gain"], 1.0)
+        check("默认灵敏度 56", tuning["sensitivity"], 56.0)
+        check("默认起振 0.85", tuning["attack"], 0.85)
+        check("默认拖尾 140 ms", tuning["release"], 140.0)
+        check("默认死区 0.04", tuning["dead_zone"], 0.04)
+        check("默认曲线 1.05", tuning["gamma"], 1.05)
+        check("默认分频 640", tuning["split"], 640.0)
+        check("默认左右分工开", tuning["dual"], True)
+        check("默认不交换马达", tuning["swap"], False)
+        check("打开震动", settings.set_haptics_enabled(True, path), True)
+        stored = settings.save_haptics_tuning(
+            {"gain": 4.0, "sensitivity": 90, "release": 300, "gamma": 9.0,
+             "split": 400, "dual": False}, path)
+        check("强度夹在 0 – 1.5", stored["gain"], 1.5)
+        check("曲线夹在 2.2", stored["gamma"], 2.2)
+        check("读回一致", settings.haptics_tuning(path), stored)
+        check("存震动不会清掉灵敏度", settings.gyro_gain(path), 2.0)
+        check("存震动不会清掉 mode", settings.mode(path), "full")
+        check("震动开关确实记下来了", settings.haptics_enabled(path), True)
 
         print("\n[4] 目录不可写时不抛异常")
         nested = os.path.join(directory, "no_such_dir", "deep", "settings.json")

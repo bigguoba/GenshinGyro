@@ -779,6 +779,20 @@ class SwitchProController:
         """Send explicit four-byte-per-side payloads (band-level control)."""
         self._write(bytes((OUTPUT_REPORT_RUMBLE,)) + bytes(left[:4]) + bytes(right[:4]))
 
+    def set_rumble_payload_counted(self, payload: bytes, counter: int) -> None:
+        """Send one 0x10 report with the rolling 4-bit packet counter in byte 1.
+
+        ``set_rumble_payload()`` writes the eight payload bytes straight after
+        0x10, i.e. it leaves the counter out.  Every reference implementation
+        (SDL, JoyShockLibrary, nsctrld) puts the counter at byte 1, and without it
+        the whole payload shifts by one byte, so the pad decodes the high-band
+        frequency as the counter and never vibrates.  Callers that build their own
+        band payloads (the haptics engine does, with the full-range amplitude
+        table) must use this form.
+        """
+        self._write(bytes((OUTPUT_REPORT_RUMBLE, int(counter) & 0x0F))
+                    + bytes(payload[:8]))
+
     def send_subcommand(self, subcommand: int, data: bytes = b"",
                         timeout_s: float = 0.3) -> bytes | None:
         """Public wrapper: run one subcommand and return its reply payload.

@@ -5,6 +5,8 @@
 ```
 Switch Pro ──HID──> 解析 + 标定 ──> DS4 报文 ──ViGEmBus──> 虚拟 DualShock 4
       实体 DS4 ──HID──> 解析 ──────┘
+                                     └──VIIPER────> 虚拟 DualSense（+ 音频端点）
+                                                        └─回环采集→ 音频震动 → 实体手柄
 ```
 
 ## 为什么要转发实体 DualShock 4
@@ -116,6 +118,98 @@ imu_sensor_notes / spi_flash_notes / USB-HID-Notes)，并与四个独立实现�
 DualShock 4 报告布局与单位依据 Linux `hid-playstation.c` 与 SDL3 `SDL_hidapi_ps4.c`。
 以上均只作协议文档参考，未包含其代码，详见 [NOTICE](../NOTICE.txt)。
 
+## 虚拟 DualSense（VIIPER）
+
+**为什么要它**：虚拟 DualShock 4 **没有震动** —— 不是没实现，是这条路走不通：
+原神不给 DS4 发震动。DualSense 有两条震动通道（output state 的普通 rumble、
+音频端点的触觉音频），而且它同样收按键/摇杆/体感，所以只要把输出端换成 DS5，
+"体感 + 震动"就能同时成立。
+
+传输层是一套本地 USB/IP 设备代理（VIIPER，GPL-3.0，**不随本项目分发**）：
+
+- 服务：`VIIPER-*.exe server --log.level=info`，TCP `127.0.0.1:3242`
+- 控制面：每行一条请求、以 NUL 结尾，回复是 JSON；本机免认证
+  （`bus/create`、`bus/{id}/add {"type": …}`、`bus/{id}/remove {dev}`、`bus/{id}/remove`）
+- 数据面：另开一条连接、`bus/{id}/{dev}` + NUL，之后是帧流：
+  16 字节头 `"VPCM"` + version 5 + 帧类型 + u16 载荷长度 + u32 序号 +
+  u32 CRC32（覆盖头 [4..12) + 载荷），后面跟载荷。
+
+设备类型两种，都要 `v5` 后缀：
+
+| 类型 | 内容 | 用途 |
+|---|---|---|
+| `dualsensecombinedaudioduplexv5` | 手柄 + 音频接口 | 转发到虚拟 DualSense |
+| `dualsenseaudioonlyduplexv5` | 只有音频接口 | 只做震动时的音频端点 |
+
+输入状态 **33 字节**，小端，无 padding：
+
+```
+4b   摇杆 LX LY RX RY（-128..127，0 = 中位）
+I    按键位（DS4 低 16 位一致；PS=0x10000、触控板=0x20000 在更高位）
+B    十字键位域（0x01 上 / 0x02 下 / 0x04 左 / 0x08 右，可组合）
+B B  扳机 L2 R2（0..255）
+H H B 触摸点 1：x, y, active
+H H B 触摸点 2：x, y, active
+3h   陀螺仪（16.384 counts/(°/s)）
+3h   加速度（835.07 counts/(m/s²)）
+```
+
+与 DS4 的区别，都是实测定下来的：
+
+- **没有时间戳** —— 主机按到达时刻算时间；DS4 中继的 `report.wTimestamp` 写进来会被忽略。
+- **陀螺/加速度单位不同**：DS4 是 16 counts/°/s、8192 counts/g，DualSense 是 16.384 与
+  835.07 counts/(m/s²)。转换系数 1.024 与 0.9997（后者差 0.03%）。
+- **十字键不在按键位里**，单独一个字节，DS4 的 hat（0..8）按表映射过去。
+- **触摸点必须显式发"未接触"**：`active` 是 u8，会被原样抄进 HID 报文的接触字节，
+  **0 表示"在 (0,0) 按着"**，必须发 `0x80`（bit7 = 未接触）。发 0 时游戏/测试工具会看到
+  一个永远停在左上角的触点。
+- 报告节奏由我们自己定（250 Hz），VIIPER 不做节流。
+
+## 音频震动（PS5 手柄原生震动）
+
+信号链照抄 Xbox Audio Rumble Studio（原项目用 XInput 驱动马达，这里换成实体手柄报文）：
+
+```
+虚拟 DualSense 音频端点的回环（WASAPI loopback，4 声道 / 48 kHz）
+  → 每声道平均成单声道
+  → 512 点 FFT（10.7 ms/块）→ 低频段 RMS（20–640 Hz）+ 高频段 RMS（600–4000 Hz）
+  → 噪底跟踪 → 自适应门限 → gamma 曲线 → 强度 → 起振/释放平滑 → 死区
+  → 两个 0..1 值（高频→左、低频→右；可交换、可关闭左右分工）
+```
+
+**报文（四种组合都在真手柄上验过，不要"优化"）**
+
+| 组合 | 报文 | 要点 |
+|---|---|---|
+| DS4 有线 | `0x05`，32 字节 | `[4]` 小马达（右）、`[5]` 大马达（左），0..255 直给 |
+| DS4 蓝牙 | `0x11`，**精确 78 字节** | 走**中断管道** `WriteFile`，CRC32 覆盖 `0xA2` + 前 74 字节。补零到 547 字节或走控制通道都不震 |
+| NS Pro（两种链路） | `0x10`，1 + 1 + 8 字节 | **byte 1 是 4 位滚动计数器**，少了它整个载荷左移；振幅用 **100 档对数表**（仓库旧表只到 33 档，上限只有满量程 1/3）；只用 320 Hz 高频段 |
+
+**延迟**：主因是蓝牙 DS4 的同步 HID 写（单次 10–20 ms）把采集循环堵住。现在所有写都在
+后台线程，邮箱里只留最新一组值，并按传输限速（NS Pro 30 ms、蓝牙 DS4 20 ms）。
+实测改完后 DS4 蓝牙与 NS Pro 的延迟一致。
+
+**安静时不能挂住**：WASAPI 回环在端点没有声音时**不产生任何数据**
+（`get_read_available()` 恒为 0）。所以采集不用阻塞 `read()`，而是"够一块才读、不够就按
+2 ms 轮询"；连续 20 ms 没数据就按一整块**静音**处理，让强度自然衰减到 0。
+否则游戏一停音，手柄就停在最后一次的强度上；而如果换回阻塞 `read()`，
+`stop()` 就只能从别的线程硬关流 —— PortAudio 那个并发会直接崩（0xC0000142/0xC0000005 一类的访问冲突）。
+
+**端点归属**：音频端点只由震动开关管 —— 打开时确保存在（没有就建 audio-only 那台），
+关掉时只拆自己建的那台。手柄转发模式切换、手柄掉线都不碰它；上一版曾在虚拟 DualSense
+出现时"让位重建"，表现为声卡中断再重建，已经去掉。
+
+**参数与映射**（界面滑块 → 引擎）：
+
+| 滑块 | 引擎参数 | 换算 |
+|---|---|---|
+| 灵敏度 0–100 | `threshold`（触发门限，RMS） | 对数：`800 × (80/800)^(x/100)`，默认 56 → ≈220 |
+| 起振 0.40–1.00 | `attack`（每块追平比例） | 直接用；未拖动时套 0.85 下限 |
+| 拖尾 30–900 ms | `release`（每块释放比例） | `r = 1 − 0.1^(1/块数)`，块数 = 时长 ÷ 10.67 ms |
+| 轻音过滤 0–20% | `dead_zone` | 直接用 |
+| 响应曲线 0.6–2.2 | `gamma` | 直接用 |
+| 低频/高频分界 250–900 Hz | `bass_high` + `vocal_low` | 两段边界一起动 |
+
 ## 一处已知不确定的地方
 
 `0x30` 报告里有 3 帧相隔 5 ms 的 IMU 采样。按 dekuNukem 文档与 Linux 驱动，
@@ -161,3 +255,8 @@ accel_origin = (0, 0, 295)
 | `watch_virtual_ds4.py` | 监视虚拟手柄的输出 |
 | `record_session.py` | 把一段时间的手柄读数写成日志 |
 | `compare_motion_streams.py` | 对比两路体感流 |
+| `rumble_probe.py` | 四种组合的震动报文自测（强度 / 频段 / 左右），`Session.set_levels()` 就是产品用的那套 |
+| `audio_rumble.py` | 音频→震动的命令行薄壳（`--list-endpoints` / `--case` / `--create-endpoint`），逻辑在根目录 `haptics.py` |
+| `haptics_probe.py` | 更早的音频震动探针（保留作对照） |
+| `viiper_audio_device.py` | 只建音频端点并保持（排障用），`--start-server` 顺带拉起 VIIPER |
+| `viiper_smoke.py` / `viiper_readback.py` / `viiper_probe.py` | VIIPER 协议与虚拟 DualSense 状态的自测与回读 |

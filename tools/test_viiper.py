@@ -76,6 +76,15 @@ def run_tests() -> None:
     check("该缩放系数极接近 1（0.03% 差异）",
           abs(viiper._accel_scale - 1.0) < 0.001, True)
 
+    print("\n[3b] 触摸板不报触摸点")
+    pad = viiper.DualSensePad(log=lambda *_: None)
+    state = pad.pack_state()
+    check("常量是 0x80（HID bit7 = 未接触）", viiper.TOUCH_INACTIVE, 0x80)
+    check("touch1 的 active 字节 = 0x80", state[15], 0x80)
+    check("touch2 的 active 字节 = 0x80", state[20], 0x80)
+    check("两个触摸点的坐标都是 0",
+          (state[11:15], state[16:20]), (bytes(4), bytes(4)))
+
     print("\n[4] 十字键编码（DS4 的 hat → DualSense 位域）")
     for hat, expected in ((0, 0x01), (2, 0x08), (4, 0x02), (6, 0x04),
                           (1, 0x09), (3, 0x0A), (5, 0x06), (7, 0x05), (8, 0x00)):
@@ -124,7 +133,65 @@ def run_tests() -> None:
     pad.unplug()                            # not plugged: must be a no-op
     check("未插入时 unplug 不报错", pad.plugged, False)
 
-    print("\n[8] 服务不可达时报错清晰")
+    print("\n[9] 实体 DS4 中继直接写 report 也能驱动虚拟 DualSense")
+    import types
+
+    import mapping
+
+    def relayed_pad(**overrides):
+        pad = viiper.DualSensePad(log=lambda *_: None)
+        config = mapping.MappingConfig(motion_pacing="raw")
+        for key, value in overrides.items():
+            setattr(config, key, value)
+        relay = mapping.DS4ToDS4Relay(controller=None, pad=pad, config=config)
+        state = types.SimpleNamespace(
+            sticks=(228, 28, 178, 78),
+            buttons=0x0008 | 0x0020,          # 中立十字键 + ✕
+            special=0x00, triggers=(10, 200), battery=8,
+            gyro=(1600, -3200, 4800), accel=(0, 0, -8192),
+            timestamp=1234, motion_valid=True)
+        relay.push_state(state)
+        return pad, relay
+
+    pad, relay = relayed_pad()
+    state = pad.pack_state()
+    check("中继写进来的摇杆原样到 DualSense",
+          struct.unpack_from("<4b", state, 0), (100, -100, 50, -50))
+    check("按键位传过来了", struct.unpack_from("<I", state, 4)[0] & 0x0020, 0x0020)
+    check("扳机传过来了", struct.unpack_from("<BB", state, 9), (10, 200))
+    check("陀螺仍按 DualSense 单位缩放",
+          struct.unpack_from("<3h", state, 21),
+          tuple(round(value * 1.024) for value in (1600, -3200, 4800)))
+    check("加速度同样缩放",
+          struct.unpack_from("<3h", state, 27)[2],
+          round(-8192 * viiper._accel_scale))
+    check("时间戳被接受但不需要（DualSense 无时间戳）", pad.report.wTimestamp, 1234)
+
+    pad, _ = relayed_pad(swap_face_buttons=True)
+    buttons = struct.unpack_from("<I", pad.pack_state(), 4)[0]
+    check("键值转换对虚拟 DualSense 生效：✕ 变成 ○",
+          (bool(buttons & 0x0020), bool(buttons & 0x0040)), (False, True))
+
+    pad, _ = relayed_pad(motion_only=True)
+    state = pad.pack_state()
+    check("仅体感模式：按键中性", struct.unpack_from("<I", state, 4)[0] & 0xFFF0, 0)
+    check("仅体感模式：摇杆中位", struct.unpack_from("<4b", state, 0), (0, 0, 0, 0))
+    check("仅体感模式：体感照旧",
+          struct.unpack_from("<3h", state, 21),
+          tuple(round(value * 1.024) for value in (1600, -3200, 4800)))
+
+    print("\n[10] 两种写法不会互相干扰")
+    pad = viiper.DualSensePad(log=lambda *_: None)
+    pad.set_buttons(0x0008 | 0x0100)          # Switch 写法：L1
+    pad.submit()
+    check("set_* + submit 仍然是 L1",
+          struct.unpack_from("<I", pad.pack_state(), 4)[0] & 0x0100, 0x0100)
+    pad.report.wButtons = 0x0008 | 0x0200     # 中继写法：R1
+    pad.submit()
+    check("之后直接写 report + submit 也生效",
+          struct.unpack_from("<I", pad.pack_state(), 4)[0] & 0x0300, 0x0200)
+
+    print("\n[11] 服务不可达时报错清晰")
     server = viiper.ViiperServer(port=1, timeout=0.5)
     try:
         server.request("bus/list")

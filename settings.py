@@ -25,6 +25,17 @@ DEFAULT_SETTINGS: dict = {
     "mode": "off",
     #: exchange the virtual pad's ✕↔○ and □↔△.
     "swap_face_buttons": False,
+    #: audio haptics: master switch plus the seven sliders and two switches.
+    "haptics_enabled": False,
+    "haptics_gain": 1.0,
+    "haptics_sensitivity": 56.0,
+    "haptics_attack": 0.85,
+    "haptics_release_ms": 140.0,
+    "haptics_dead_zone": 0.04,
+    "haptics_gamma": 1.05,
+    "haptics_split": 640.0,
+    "haptics_dual_motor": True,
+    "haptics_motor_swap": False,
 }
 
 #: Same limits as the GUI sliders.
@@ -37,7 +48,43 @@ DEADZONE_AXES = ("pitch", "yaw", "roll")
 #: Which checkbox was ticked last time.  A word keeps the file readable; anything
 #: unknown falls back to "off", i.e. nothing forwarded.
 MODE_DEFAULT = "off"
-MODE_CHOICES = ("off", "full", "motion", "genshin")
+#: "ds5" = the same full forwarding as "full", but the virtual pad is a DualSense.
+MODE_CHOICES = ("off", "full", "motion", "genshin", "ds5")
+
+#: Audio haptics (the rumble feature).  The window shows six sliders; each one is
+#: stored as the raw parameter the engine consumes, so ``settings.json`` stays
+#: readable and hand-editable.  The ranges and decimals mirror ``haptics.RANGES``
+#: (cross-checked by ``tools/test_haptics.py``); they live here as plain numbers so
+#: this module keeps its "standard library only" promise.
+HAPTICS_RANGES = {
+    "gain": (0.0, 1.5),
+    "sensitivity": (0.0, 100.0),
+    "attack": (0.40, 1.00),
+    #: 拖尾时长（毫秒）：越大余震越长。
+    "release": (30.0, 900.0),
+    "dead_zone": (0.0, 0.20),
+    "gamma": (0.6, 2.2),
+    "split": (250.0, 900.0),
+}
+HAPTICS_DECIMALS = {
+    "gain": 2, "sensitivity": 1, "attack": 2, "release": 0, "dead_zone": 3,
+    "gamma": 2, "split": 0,
+}
+#: slider key -> settings key
+HAPTICS_KEYS = {
+    "gain": "haptics_gain",
+    "sensitivity": "haptics_sensitivity",
+    "attack": "haptics_attack",
+    "release": "haptics_release_ms",
+    "dead_zone": "haptics_dead_zone",
+    "gamma": "haptics_gamma",
+    "split": "haptics_split",
+}
+#: switch key -> settings key
+HAPTICS_FLAGS = {
+    "dual": "haptics_dual_motor",
+    "swap": "haptics_motor_swap",
+}
 
 
 def settings_path() -> str:
@@ -59,6 +106,12 @@ def load(path: str | None = None) -> dict:
             values.update(stored)
     except (OSError, ValueError):
         pass                                    # missing or unreadable: defaults
+    # The preset dropdown became six sliders; drop the old key when a file from
+    # that build is loaded, so it stops being written back on every save.  The
+    # tail used to be stored as a 0..1 per-block coefficient; the key is now
+    # *_ms (milliseconds) so an old value cannot be misread as 0.16 ms.
+    values.pop("haptics_preset", None)
+    values.pop("haptics_release", None)
     return values
 
 
@@ -82,7 +135,10 @@ def save(values: dict, path: str | None = None, attempts: int = 5) -> str | None
             if directory and not os.path.isdir(directory):
                 os.makedirs(directory, exist_ok=True)
             with open(target, "w", encoding="utf-8") as handle:
-                json.dump(merged, handle, indent=2, sort_keys=True)
+                # ensure_ascii=False so a Chinese preset name stays readable in a
+                # file the module docstring invites people to hand-edit.
+                json.dump(merged, handle, indent=2, sort_keys=True,
+                          ensure_ascii=False)
             return target
         except OSError:
             if attempt + 1 < max(1, attempts):
@@ -177,4 +233,60 @@ def set_swap_face_buttons(value, path: str | None = None) -> bool:
     """Remember the face-button exchange; returns what was actually stored."""
     chosen = clamp_flag(value)
     save({"swap_face_buttons": chosen}, path)
+    return chosen
+
+
+# --------------------------------------------------------------------------- #
+# Audio haptics
+# --------------------------------------------------------------------------- #
+
+def clamp_haptics(key: str, value) -> float:
+    """Coerce anything into a usable rumble parameter (range from HAPTICS_RANGES)."""
+    if key not in HAPTICS_RANGES:
+        return 0.0
+    low, high = HAPTICS_RANGES[key]
+    default = DEFAULT_SETTINGS[HAPTICS_KEYS[key]]
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number:                        # NaN
+        return default
+    return round(max(low, min(high, number)), HAPTICS_DECIMALS[key])
+
+
+def haptics_tuning(path: str | None = None) -> dict:
+    """The remembered rumble parameters, as the engine's ``apply_tuning`` wants them."""
+    stored = load(path)
+    values = {key: clamp_haptics(key, stored.get(HAPTICS_KEYS[key]))
+              for key in HAPTICS_KEYS}
+    for name, settings_key in HAPTICS_FLAGS.items():
+        values[name] = clamp_flag(stored.get(settings_key))
+    return values
+
+
+def save_haptics_tuning(values: dict, path: str | None = None) -> dict:
+    """Remember a whole set of rumble parameters; returns what was stored."""
+    values = values or {}
+    numbers = {key: clamp_haptics(key, values.get(key, DEFAULT_SETTINGS[HAPTICS_KEYS[key]]))
+               for key in HAPTICS_KEYS}
+    flags = {name: clamp_flag(values.get(name, DEFAULT_SETTINGS[settings_key]))
+             for name, settings_key in HAPTICS_FLAGS.items()}
+    stored = {HAPTICS_KEYS[key]: value for key, value in numbers.items()}
+    stored.update({HAPTICS_FLAGS[name]: value for name, value in flags.items()})
+    save(stored, path)
+    result = dict(numbers)
+    result.update(flags)
+    return result
+
+
+def haptics_enabled(path: str | None = None) -> bool:
+    """Whether the rumble switch was on when the program last closed."""
+    return clamp_flag(load(path).get("haptics_enabled"))
+
+
+def set_haptics_enabled(value, path: str | None = None) -> bool:
+    """Remember the master switch; returns what was actually stored."""
+    chosen = clamp_flag(value)
+    save({"haptics_enabled": chosen}, path)
     return chosen
