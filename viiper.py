@@ -32,9 +32,16 @@ import zlib
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 3242
 
-#: Device type to create.  This build names its devices with the v5 suffixes;
-#: "combined audio duplex" is the one with both the gamepad and the audio
-#: interface, which is what a game needs in order to send audio haptics.
+#: Device type to create: **pad + its own audio interface, in one USB device**.
+#:
+#: The audio interface has to live on the pad itself, and this is a hard requirement
+#: from Windows' naming rule (measured, see ``docs/tech.md``): when a second DualSense
+#: *device* exists, the endpoint that appears later is called
+#: "扬声器 (2- DualSense Wireless Controller)" — and the game looks its output up by
+#: name, so a numbered endpoint receives nothing and the rumble goes silent.
+#: With this type the pad's own endpoint keeps the plain name; the rumble feature
+#: therefore **adopts** it (``haptics.HapticsRunner.prefer_combined``) instead of
+#: creating a second audio-only device.
 DEVICE_TYPE = "dualsensecombinedaudioduplexv5"
 
 FRAME_MAGIC = b"VPCM"

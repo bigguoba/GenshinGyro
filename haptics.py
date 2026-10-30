@@ -3,7 +3,7 @@
 链路（每一项都在真手柄上验证过，见 ``HANDOVER-RUMBLE.md`` 第 2 节）：
 
     虚拟 DualSense 音频端点（回环）
-      → 每声道平均成单声道 → 512 点 FFT（48 kHz 下 10.7 ms/块）
+      → 只取第 3/4 声道（触觉）混成单声道 → 512 点 FFT（48 kHz 下 10.7 ms/块）
       → 低频段 / 高频段 RMS → 门限、gamma、强度
       → 起振 / 释放平滑 → 死区 → 脉冲保持（默认关）
       → 两个 0..1 值 → 后台发送线程 → 四种手柄报文
@@ -15,7 +15,8 @@
 * NS Pro 的 ``0x10`` 报文 **byte 1 是 4 位计数器**，少了它载荷整体左移；
 * NS Pro 振幅要用 **100 档对数表**（:func:`_log_index`），仓库原表只到 33 档；
 * DS4 蓝牙必须 **精确 78 字节 + 中断管道**，``DualShock4.write_output()`` 会补零；
-* 音频 **四声道平均**，双马达 **高频→左、低频→右**；
+* 音频只取 **第 3/4 声道**（触觉；0/1 是手柄扬声器，不能混进来），
+  双马达 **高频→左、低频→右**；
 * HID 写必须在后台线程里（蓝牙单次写会超过一个采集块）。
 
 模块结构：
@@ -44,6 +45,7 @@ import time
 
 import dualshock4
 import hidwin
+import paths
 import switchpro
 import viiper
 
@@ -103,6 +105,16 @@ SPLIT_MIN, SPLIT_MAX = 250.0, 900.0
 #: 一块音频的时长（毫秒），按 48 kHz 的标准值算（CHUNK 512 → 10.67 ms）。
 BLOCK_MS = CHUNK * 1000.0 / 48000.0
 
+#: 虚拟 DualSense 的音频端点是 **4 声道**，触觉信号只走 **第 3、4 声道**（下标 2/3）：
+#:
+#: * 声道 2 / 3 = 触觉（左右两个马达）—— 游戏写给 PS5 的触觉音频就在这里；
+#: * 声道 0 / 1 = 手柄扬声器 / 普通音频 —— 混进来只会把震动信号弄脏
+#:   （对白、音乐、音效都会被当成震动）。
+#:
+#: 所以只取 2/3。除数仍用**总声道数**，这样和"四声道平均"的电平一致，
+#: 用户不用重新调灵敏度。
+HAPTIC_CHANNELS = {4: (2, 3)}
+
 #: 各手动参数的范围，界面滑块和引擎夹取用的是同一张表。
 RANGES = {
     "sensitivity": (SENSITIVITY_MIN, SENSITIVITY_MAX),
@@ -139,6 +151,24 @@ def release_from_tail(tail_ms: float) -> float:
         tail = 140.0
     blocks = max(0.05, max(RELEASE_MIN, min(RELEASE_MAX, tail)) / BLOCK_MS)
     return 1.0 - 0.1 ** (1.0 / blocks)
+
+
+def mix_to_mono(samples, channels: int):
+    """交错的多声道样本 → 单声道（只取触觉声道，见 :data:`HAPTIC_CHANNELS`）。
+
+    4 路端点只累加 2/3（触觉），除数仍用总声道数 —— 0/1（手柄扬声器）当静音，
+    电平和"四声道平均"一致，所以同样的音频不会突然震一倍强。
+    """
+    if channels <= 1:
+        return samples
+    frames = int(len(samples) // channels)
+    if frames <= 0:
+        return samples[:0]
+    block = samples[:frames * channels].reshape(frames, channels)
+    picks = HAPTIC_CHANNELS.get(channels)
+    if picks is None:
+        return block.mean(axis=1)
+    return block[:, picks].sum(axis=1) / channels
 
 
 def tail_from_release(release: float) -> float:
@@ -836,10 +866,25 @@ def wait_for_viiper(seconds: float, host: str = viiper.DEFAULT_HOST,
     return False
 
 
+def _viiper_search_roots() -> list[str]:
+    """``VIIPER-*.exe`` 的候选目录：程序目录、它的上一级、以及本模块所在目录。
+
+    打包后（PyInstaller）``__file__`` 落在 ``_internal`` 里，光用它和它的上一级
+    只能到 ``_internal`` 与 ``GenshinGyro-vX.Y.Z`` —— 正好漏掉"exe 的上一级"这个
+    用户最常放 VIIPER 的位置，表现就是「没找到 VIIPER-*.exe」。所以以
+    :func:`paths.app_dir`（打包时 = exe 所在目录）为准。
+    """
+    roots: list[str] = []
+    for candidate in (paths.app_dir(), os.path.dirname(paths.app_dir()),
+                      os.path.dirname(os.path.abspath(__file__))):
+        if candidate and candidate not in roots:
+            roots.append(candidate)
+    return roots
+
+
 def find_server_exe() -> str | None:
-    """项目目录 / 工作区目录里的 ``VIIPER-*.exe``（与排障工具同一套找法）。"""
-    here = os.path.dirname(os.path.abspath(__file__))
-    for root in (here, os.path.dirname(here)):
+    """程序目录或它的上一级里的 ``VIIPER-*.exe``（与排障工具同一套找法）。"""
+    for root in _viiper_search_roots():
         matches = sorted(glob.glob(os.path.join(root, "VIIPER-*.exe")))
         if matches:
             return matches[-1]
@@ -897,6 +942,13 @@ class AudioEndpoint:
         self.allow_server_start = bool(allow_server_start)
         #: False = 只复用别人建的端点（DS5 后端那条路径），绝不自己再建一个。
         self.allow_create = bool(allow_create)
+        #: True = 转发到虚拟 DualSense 正在跑：优先复用它手柄自带的音频端点。
+        #: 另建一台会让 Windows 给后出现的那台加 "2-" 前缀（同名设备规则），
+        #: 而游戏是按名字找输出的，带前缀就等于收不到音频。
+        self.prefer_shared = False
+        #: 等"手柄自带的端点"出现的时间；等不到就退回去自己建（那时系统里
+        #: 本来也没有第二只 DualSense，名字是干净的）。
+        self.shared_wait_s = 10.0
         self.server_exe = server_exe
         self._list = list_fn or loopback_devices
         self._port_open = port_fn or (lambda: viiper_port_open())
@@ -967,6 +1019,13 @@ class AudioEndpoint:
             self.log("自己建的音频端点已经不见了，重新创建")
             self.release()
 
+        if self.prefer_shared and not self._owned:
+            # 虚拟手柄自带音频接口：复用它那一台，绝不另建。
+            found = self._wait_for_endpoint(self.shared_wait_s)
+            if found is not None:
+                return self._adopt(found)
+            self.log("等不到虚拟手柄的音频端点，改为自己建一台")
+
         if not self.allow_create:
             # 后端正在建自己的带手柄设备时，端点要过一会儿才出现；这段时间只能
             # 等，不能再建一个 audio-only 设备（那会在系统里留第二份虚拟声卡）。
@@ -980,18 +1039,20 @@ class AudioEndpoint:
         if not self._port_open():
             if not self.allow_server_start or self._failed_server:
                 raise EndpointError(
-                    "虚拟音频通道创建失败：VIIPER 服务没有运行"
-                    "（先运行 启动-VIIPER服务.bat，或用 --start-server 自动启动）")
+                    "虚拟音频通道创建失败：VIIPER 服务没有运行（重启程序试试）")
             exe = self.server_exe or find_server_exe()
             if exe is None:
                 raise EndpointError(
-                    "虚拟音频通道创建失败：没找到 VIIPER-*.exe，无法自动启动服务")
+                    "虚拟音频通道创建失败：没找到 VIIPER-*.exe"
+                    "（放回 GenshinGyro.exe 旁边）")
             self.log(f"VIIPER 没在运行，启动：{os.path.basename(exe)}")
             self._server_process = self._launch()
             if self._server_process is None or not wait_for_viiper(20.0):
                 self._failed_server = True
                 self._stop_own_server()
-                raise EndpointError("虚拟音频通道创建失败：VIIPER 服务没有起来")
+                raise EndpointError(
+                    "虚拟音频通道创建失败：VIIPER 没起来"
+                    "（多半是缺 usbip-win2 驱动，见快速开始）")
             self.log("VIIPER 服务已就绪")
 
         last_error = None
@@ -1046,8 +1107,8 @@ class AudioEndpoint:
         self.log(f"音频端点已存在，直接复用：{self._name}")
         return self._name
 
-    def _wait_for_endpoint(self) -> dict | None:
-        deadline = time.monotonic() + max(0.0, self.wait_s)
+    def _wait_for_endpoint(self, seconds: float | None = None) -> dict | None:
+        deadline = time.monotonic() + max(0.0, self.wait_s if seconds is None else seconds)
         while True:
             found = self.find()
             if found is not None:
@@ -1519,9 +1580,7 @@ class HapticsEngine:
                     break
                 if raw:
                     array = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
-                    if self._channels > 1:
-                        count = (array.size // self._channels) * self._channels
-                        array = array[:count].reshape(-1, self._channels).mean(axis=1)
+                    array = mix_to_mono(array, self._channels)
                 else:
                     # 端点安静：按一整块零处理，让平滑曲线自然衰减到 0。
                     array = np.zeros(self._chunk, dtype=np.float32)
@@ -1686,6 +1745,8 @@ class HapticsRunner(threading.Thread):
         self._wake = threading.Event()
         self._tuning = dict(DEFAULT_TUNING)
         self._endpoint_ready = False
+        #: 设备集合变了（虚拟手柄来了/走了）：下一轮先停引擎、拆端点、重新确认。
+        self._refresh = False
         self.status = "已关闭"
         self.error: str | None = None
         self.failed = False
@@ -1715,6 +1776,30 @@ class HapticsRunner(threading.Thread):
         with self._lock:
             self._wanted = None
         self._ensure_thread()
+        self._wake.set()
+
+    # -- 端点归属 --------------------------------------------------------- #
+
+    def prefer_combined(self, value: bool = True) -> None:
+        """转发到虚拟 DualSense 时，只复用它手柄自带的那个音频端点。
+
+        为什么必须这样：Windows 对**第二只**同名 DualSense 的音频端点会加
+        "2-" 前缀，而游戏按名字找输出 —— 拿到带前缀的端点就收不到音频。所以
+        虚拟手柄在的时候不自己建 audio-only（见 :meth:`AudioEndpoint.ensure`），
+        先把已有的那台拆掉（如果是我建的），让手柄那台拿到干净的名字。
+        """
+        self.endpoint.prefer_shared = bool(value)
+        with self._lock:
+            if self._wanted is not None:
+                self._refresh = True
+        self._wake.set()
+
+    def refresh_endpoint(self) -> None:
+        """让后台线程重新确认一次端点（设备集合变了：虚拟手柄来了/走了）。"""
+        with self._lock:
+            if self._wanted is None:
+                return
+            self._refresh = True
         self._wake.set()
 
     # -- 参数 ------------------------------------------------------------- #
@@ -1787,6 +1872,14 @@ class HapticsRunner(threading.Thread):
                 self._wake.wait(0.5)
                 self._wake.clear()
                 continue
+            with self._lock:
+                refresh, self._refresh = self._refresh, False
+            if refresh:
+                # 虚拟手柄带着自己的音频端点来了/走了：引擎绑的是旧端点对象，
+                # 先停掉引擎、拆掉可能是我建的那台，再重新确认一次。
+                if engine is not None:
+                    self._shutdown_engine()
+                self._release_endpoint()
             if not self._endpoint_ready:
                 if not self._ensure_endpoint():
                     # 端点建不出来是致命的（VIIPER 起不来 / 驱动缺失）：放弃请求，

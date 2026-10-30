@@ -1054,6 +1054,7 @@ class App:
         if mode not in (MODE_OFF, MODE_FULL, MODE_MOTION, MODE_GENSHIN, MODE_DS5):
             mode = MODE_OFF
         genshin = mode == MODE_GENSHIN
+        previous = self.mode
         self.mode = mode
         # "ds5" forwards everything, just onto a DualSense instead of a DualShock 4.
         self.config.motion_only = mode in (MODE_MOTION, MODE_GENSHIN)
@@ -1079,6 +1080,14 @@ class App:
             self.source_var.set(SOURCE_LABELS.get(restore, SOURCE_LABELS["auto"]))
             self._switch_source(restore)
 
+        # The virtual DualSense brings its own audio endpoint.  Windows names a
+        # *second* same-named device "2- DualSense …" and the game looks its output
+        # up by name, so the rumble side must let go of its own audio-only card
+        # *before* the pad is created, then adopt the pad's endpoint.
+        if mode == MODE_DS5:
+            self.haptics_runner.prefer_combined(True)
+        elif previous == MODE_DS5:
+            self.haptics_runner.prefer_combined(False)
         self._set_backend("dualsense" if mode == MODE_DS5 else "vigem")
         self._set_forwarding(mode != MODE_OFF)
         self._update_mode_hint()

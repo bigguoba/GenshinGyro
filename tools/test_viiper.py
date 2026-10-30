@@ -76,6 +76,14 @@ def run_tests() -> None:
     check("该缩放系数极接近 1（0.03% 差异）",
           abs(viiper._accel_scale - 1.0) < 0.001, True)
 
+    print("\n[3c] 转发用的设备类型自带音频（否则 Windows 会给端点加 2- 前缀）")
+    check("默认类型是 combined（手柄 + 音频一体）",
+          viiper.DEVICE_TYPE, "dualsensecombinedaudioduplexv5")
+    check("名字里带 audio（端点因此与手柄同属一只设备）",
+          "combinedaudioduplex" in viiper.DEVICE_TYPE, True)
+    pad = viiper.DualSensePad(log=lambda *_: None)
+    check("DualSensePad 默认就用这个类型", pad.device_type, viiper.DEVICE_TYPE)
+
     print("\n[3b] 触摸板不报触摸点")
     pad = viiper.DualSensePad(log=lambda *_: None)
     state = pad.pack_state()

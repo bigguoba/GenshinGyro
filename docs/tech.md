@@ -171,7 +171,8 @@ H H B 触摸点 2：x, y, active
 
 ```
 虚拟 DualSense 音频端点的回环（WASAPI loopback，4 声道 / 48 kHz）
-  → 每声道平均成单声道
+  → 只取第 3 / 4 声道（触觉通道；第 1 / 2 声道是手柄扬声器，混进来会被对白和音乐带偏）
+  → 两路相加后除以总声道数（4），电平与"四声道平均"一致，所以灵敏度不用重调
   → 512 点 FFT（10.7 ms/块）→ 低频段 RMS（20–640 Hz）+ 高频段 RMS（600–4000 Hz）
   → 噪底跟踪 → 自适应门限 → gamma 曲线 → 强度 → 起振/释放平滑 → 死区
   → 两个 0..1 值（高频→左、低频→右；可交换、可关闭左右分工）
@@ -209,6 +210,30 @@ H H B 触摸点 2：x, y, active
 | 轻音过滤 0–20% | `dead_zone` | 直接用 |
 | 响应曲线 0.6–2.2 | `gamma` | 直接用 |
 | 低频/高频分界 250–900 Hz | `bass_high` + `vocal_low` | 两段边界一起动 |
+
+## 音频端点的命名：为什么音频接口必须长在手柄上
+
+游戏（原神）按 **设备名字** 找音频输出，所以端点的友好名必须**恰好**是
+`DualSense Wireless Controller`，多一个前缀就收不到任何音频。而 Windows 的命名规则
+会把"第二只同名设备"的音频端点叫成 `2- DualSense Wireless Controller`。
+
+实测三种组合（同一台机器，每次都把设备清干净）：
+
+| 场景 | 结果 |
+|---|---|
+| 只建 audio-only，拆掉再建一次 | `DualSense Wireless Controller`（干净，说明不是"历史上建过"的问题）|
+| 先建**只有手柄**的 DualSense，再建 audio-only | 音频端点变成 `2- DualSense Wireless Controller` |
+| 建**手柄 + 音频一体**的 DualSense（`dualsensecombinedaudioduplexv5`） | `DualSense Wireless Controller`（干净）|
+
+所以：
+
+* 转发用的设备类型是 **combined**（手柄与音频接口在同一个 USB 设备里）；
+* 震动开关打开时 **复用** 这只手柄的端点，**绝不另建**（`HapticsRunner.prefer_combined`）；
+* 只开震动、不开转发时才建 `dualsenseaudioonlyduplexv5`（此时系统里没有第二只
+  DualSense，名字干净）；
+* 从"震动已开"切到"虚拟 DualSense"时，先把震动自己那台拆掉再建手柄
+  （`AudioEndpoint.prefer_shared` + `HapticsRunner.refresh_endpoint`），
+  这样手柄那台拿到的是干净名字，而不是 `2-`。
 
 ## 一处已知不确定的地方
 

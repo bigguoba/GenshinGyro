@@ -115,14 +115,14 @@ v1.4.0 起还能转发成一只**虚拟 DualSense（PS5 手柄）**，并加上*
 ## 驱动与可选工具
 
 本程序自身不安装任何驱动，但虚拟手柄来自 **ViGEmBus**；虚拟 DualSense 与震动还要
-**usbip-win2** 和 **VIIPER** 两样东西（都是装上就完事，不需要每次启动）；另外有一个可选的
-**HidHide**，在上面那张表里有时是"必须"、有时是"绝对不要"。
+**usbip-win2** 驱动（装一次）。**VIIPER 已经随包附带**，不用自己下载；
+另外有一个可选的 **HidHide**，在上面那张表里有时是"必须"、有时是"绝对不要"。
 
 | 组件 | 必需？ | 作用 | 不做会怎样 |
 |---|---|---|---|
 | **ViGEmBus** | 用虚拟 DualShock 4 时必需 | 创建虚拟手柄的内核驱动 | 程序能开，但永远不出现虚拟 DualShock 4 |
 | **usbip-win2** | 用虚拟 DualSense / 震动时必需 | USB/IP 的内核驱动 + `usbip.exe`（VIIPER 的底层） | VIIPER 起不来或报「usbip-win2 驱动没找到」，那两个功能都用不了 |
-| **VIIPER** | 用虚拟 DualSense / 震动时必需 | 本地 USB/IP 设备代理，创建虚拟 DualSense 和它的音频端点 | 会报「没找到 VIIPER-*.exe」或「VIIPER 服务没有起来」；虚拟 DualShock 4 不受影响 |
+| **VIIPER** | 用虚拟 DualSense / 震动时必需（**已随包附带**） | 本地 USB/IP 设备代理，创建虚拟 DualSense 和它的音频端点 | 别删发行包里的 VIIPER-*.exe，删了会报「没找到 VIIPER-*.exe」；虚拟 DualShock 4 不受影响 |
 | **HidHide** | 视情况 | 把实体手柄从其他程序眼里藏起来 | NS 模式不装会键值错乱；"认按键不认体感"的情况装了反而坏 |
 
 ### ViGEmBus（必需）
@@ -157,24 +157,31 @@ VIIPER 造出来的"虚拟 USB 设备"要靠 **USB/IP** 这个协议挂进 Windo
 >
 > 装完可以用管理员 cmd 运行 `usbip list -l` 验证：能列出本机 USB 设备就说明驱动正常。
 
-### VIIPER（虚拟 DualSense / 震动才需要）
+### VIIPER（虚拟 DualSense / 震动才需要，已随包附带）
 
 [VIIPER](https://github.com/alia5/VIIPER/releases) 是一个独立的本地 USB/IP 设备代理
-（GPL-3.0，本项目不附带它）。它负责创建虚拟 DualSense 和那只手柄的音频端点。
-它依赖上面的 usbip-win2，所以**顺序是：先装 usbip-win2，再放 VIIPER**。
+（GPL-3.0，上游的原始二进制，见 [NOTICE](NOTICE.txt) 与 `viiper-LICENSE.txt`）。
+它负责创建虚拟 DualSense 和那只手柄的音频端点。
 
-1. 到 Releases 下载 `VIIPER-*-x64.exe`
-2. 放到 **`GenshinGyro.exe` 旁边**（或它所在的上一级目录）
-3. 不用手动启动：打开「转发到虚拟 DualSense」或「PS5 手柄原生震动」时，程序会自己把它拉起来
+**发行包里已经带了 `VIIPER-0.1.9-rc4.6.6-x64.exe`**，和 `GenshinGyro.exe` 在同一层，
+所以什么都不用下载：打开「转发到虚拟 DualSense」或「PS5 手柄原生震动」时，
+程序会自己把它拉起来。唯一的前提是上面那个 usbip-win2 驱动已经装好。
+
+> 想换更新的 VIIPER：把新版 exe 放进同一目录、删掉旧的即可（程序按 `VIIPER-*.exe` 找）。
 
 > 出问题时先单独跑一次 VIIPER：双击 `VIIPER-*.exe`，它会自己开一个控制台并把
 > 「usbip-win2 driver found / not found」写在第一行 —— 那行就是问题所在。
 
-> 两个功能可以分开用：**只做震动**不需要转发到虚拟 DualSense —— 震动开关会自己建一台
-> 只带音频、没有手柄的虚拟 DualSense。反过来只转发 DualSense 不开震动也完全正常。
-> 两者同时开时，系统里会出现两个同名的「扬声器 (DualSense Wireless Controller)」端点
-> （震动自己那台 + 虚拟手柄自带那台）；如果游戏挑错了那台导致没震动，
-> 把震动开关关一下再打开，程序就会直接复用虚拟手柄那台，只剩一个端点。
+> **系统里永远只有一台「扬声器 (DualSense Wireless Controller)」，名字不带前缀。**
+> 这不是小事：游戏是按名字找输出设备的，而 Windows 有个规则 —— 当系统里已经有一只
+> DualSense 设备时，**另建**出来的音频设备会被叫成「2- DualSense Wireless Controller」，
+> 游戏就永远找不到它、也就不会往里写触觉音频（震动就没了）。
+>
+> 所以：转发到虚拟 DualSense 时，音频接口**长在手柄这只设备上**
+> （VIIPER 的 `dualsensecombinedaudioduplexv5`），名字自然是干净的；震动开关打开时
+> **复用它那台**，不另建。只开震动、不开转发时，才由震动自己建一台只带音频的
+> （`dualsenseaudioonlyduplexv5`，那时系统里没有第二只 DualSense，名字同样干净）。
+> 两种开法（先震动后转发 / 先转发后震动）都实测过，最终都只剩一台、名字没前缀。
 
 ### HidHide（NS 模式必须，其它情况按表格判断）
 
@@ -260,9 +267,9 @@ NS 模式必须用它，因为原神会把 NS 模式手柄识别成错误的东�
 
 几个已知的坑：
 
-1. **VIIPER 不在**：震动需要它建音频端点。把 `VIIPER-*.exe` 放到 `GenshinGyro.exe` 旁边。
-2. **两个同名端点**：震动和虚拟 DualSense 同时开时会出现两台「扬声器 (DualSense …)」。
-   游戏可能把音频输出到其中一台，而程序采集的是另一台。把震动开关关一下再打开即可（只留一台）。
+1. **VIIPER 不在**：震动需要它建音频端点。`VIIPER-*.exe` 必须待在 `GenshinGyro.exe` 旁边。
+2. **系统里一台「扬声器 (DualSense …)」都没有** → 震动开关没真正打开（看状态行），
+   或者开关打开时音频端点建失败、被自动弹回去了。
 3. **蓝牙手柄偶发没反应**：程序每次开震动都会自己开一个 HID 句柄；如果手柄刚好在休眠，
    先按一下键唤醒，再把开关关/开一次。
 </details>
@@ -295,7 +302,7 @@ NS 模式必须用它，因为原神会把 NS 模式手柄识别成错误的东�
 
 - **真手柄逐项核对 33/33 全部通过**，无需任何修正：18 个按键、十字键 4 向、双摇杆 8 向、
   体感三轴正负号、静止零偏、平放重力。
-- **967 项自动断言**（`tools/` 下 9 个脚本）覆盖报文解析、单位换算、按键映射、
+- **987 项自动断言**（`tools/` 下 9 个脚本）覆盖报文解析、单位换算、按键映射、
   蓝牙中继、设置读写、界面步进、震动引擎、虚拟 DualSense 状态打包。
 - 震动在**真手柄**上验过四种组合（DS4 / NS Pro × 有线 / 蓝牙），并在真 VIIPER 上验过
   设备创建/清理、250 Hz 输入流、触摸点、声卡与转发互不干扰。
@@ -307,8 +314,8 @@ NS 模式必须用它，因为原神会把 NS 模式手柄识别成错误的东�
 python tools\test_end_to_end.py      :: 92 项
 python tools\test_ds4_relay.py       :: 108 项
 python tools\test_gui_flow.py        :: 133 项
-python tools\test_haptics.py         :: 368 项
-python tools\test_viiper.py          :: 64 项
+python tools\test_haptics.py         :: 382 项
+python tools\test_viiper.py          :: 67 项
 python tools\test_verify_plan.py     :: 74 项
 python tools\test_rumble.py          :: 54 项
 python tools\test_settings.py        :: 67 项

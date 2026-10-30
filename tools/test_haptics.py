@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import sys
 import time
 
@@ -201,13 +202,24 @@ class FakeAudio:
 
 
 class FakeInputStream:
-    """A 1 kHz tone, i.e. inside the 600–4000 Hz ("vocal") band."""
+    """A 1 kHz tone in the 600–4000 Hz ("vocal") band.
 
-    def __init__(self, freq=1000.0, amplitude=12000.0, rate=48000, channels=4):
+    ``channels`` interleaved channels, laid out like the real virtual DualSense:
+    a 4-channel endpoint has the **haptics on channels 2/3** (the 3rd and 4th
+    channel, like a real PS5) and the **speaker on 0/1**.  Writing the tone into
+    all four (the old fake) painted a picture the hardware never has -- the engine
+    now reads 2/3 only.
+    """
+
+    def __init__(self, freq=1000.0, amplitude=12000.0, rate=48000, channels=4,
+                 tone_channels=None):
         self.freq = float(freq)
         self.amplitude = float(amplitude)
         self.rate = rate
         self.channels = channels
+        if tone_channels is None:
+            tone_channels = (2, 3) if channels >= 4 else tuple(range(channels))
+        self.tone_channels = tuple(tone_channels)
         self.phase = 0
         self.closed = False
         self.reads = 0
@@ -220,8 +232,16 @@ class FakeInputStream:
         index = np.arange(frames) + self.phase
         block = (self.amplitude
                  * np.sin(2 * np.pi * self.freq * index / self.rate)).astype(np.int16)
+        # 门限式的 4 Hz 方波包络：自适应噪底会把"一直响的稳定音"慢慢当成底噪
+        # （这是预设里 adaptive=True 的固有行为），真实的游戏音效也不是连续的，
+        # 所以测试用有起伏的信号，否则测的是自适应而不是"恢复输出"。
+        gate_on = ((index % (self.rate // 4)) < (self.rate // 8))
+        block = np.where(gate_on, block, 0).astype(np.int16)
         self.phase += frames
-        return np.repeat(block, self.channels).tobytes()
+        interleaved = np.zeros((frames, self.channels), dtype=np.int16)
+        for channel in self.tone_channels:
+            interleaved[:, channel] = block
+        return interleaved.reshape(-1).tobytes()
 
     def close(self):
         self.closed = True
@@ -360,6 +380,43 @@ def test_signal_helpers() -> None:
           haptics.classify_content(900, 200, 700, 0.9, "识别中"), "音乐")
     check("人声占比高偏向 ASMR",
           haptics.classify_content(900, 800, 40, 0.05, "识别中"), "ASMR")
+
+    # 虚拟 DualSense 的音频端点 4 声道：2/3（第 3、4 声道）= 触觉，0/1 = 手柄扬声器。
+    # 只取 2/3，且除数用总声道数，保证同样的音频不会因为"忽略扬声器"而变强/变弱。
+    import numpy as np
+
+    print("\n[1b] 4 声道混音：只取第 3/4 声道（触觉），第 1/2 声道不参与")
+    haptic_only = np.zeros((4, 4), dtype=np.float32)
+    haptic_only[:, 2] = haptic_only[:, 3] = 1000.0
+    check("只有触觉声道时输出 = 旧版电平",
+          [round(v, 1) for v in haptics.mix_to_mono(haptic_only.reshape(-1), 4)],
+          [500.0] * 4)
+
+    speaker_only = np.zeros((4, 4), dtype=np.float32)
+    speaker_only[:, 0] = speaker_only[:, 1] = 8000.0
+    check("只有 1/2 声道（对白/扬声器）时完全不震",
+          [round(v, 1) for v in haptics.mix_to_mono(speaker_only.reshape(-1), 4)],
+          [0.0] * 4)
+
+    both = haptic_only + speaker_only
+    check("1/2 声道再响也不会污染震动强度",
+          [round(v, 1) for v in haptics.mix_to_mono(both.reshape(-1), 4)],
+          [500.0] * 4)
+
+    check("触觉声道只取 2/3，且与 1/2 声道不重叠",
+          (haptics.HAPTIC_CHANNELS[4],
+           set(haptics.HAPTIC_CHANNELS[4]) & {0, 1}),
+          ((2, 3), set()))
+
+    stereo = np.ones((4, 2), dtype=np.float32) * 1000.0
+    check("2 声道端点仍然取平均",
+          [round(v, 1) for v in haptics.mix_to_mono(stereo.reshape(-1), 2)],
+          [1000.0] * 4)
+    check("单声道原样通过",
+          [round(v, 1) for v in haptics.mix_to_mono(
+              np.array([1.0, 2.0], dtype=np.float32), 1)],
+          [1.0, 2.0])
+    check("4 声道分工表就是 (2, 3)", haptics.HAPTIC_CHANNELS[4], (2, 3))
 
 
 def test_log_index() -> None:
@@ -791,6 +848,35 @@ def test_endpoint_lifecycle() -> None:
                                        allow_create=False)
     check("端点出现后就能复用", endpoint.ensure(), ENDPOINT_NAME)
     check("复用来的不归自己", endpoint.owned, False)
+
+    print("\n[9j] 找 VIIPER-*.exe：打包后（__file__ 在 _internal 里）也要能找到")
+    import paths as paths_module
+    original_app_dir = paths_module.app_dir
+    scratch = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "build", "viiper_exe_test")
+    app = os.path.join(scratch, "GenshinGyro-v1.4.0")
+    try:
+        os.makedirs(os.path.join(app, "_internal"), exist_ok=True)
+        # 用户最常放的位置：exe 旁边
+        beside = os.path.join(app, "VIIPER-1.0.0-x64.exe")
+        open(beside, "wb").close()
+        paths_module.app_dir = lambda: app
+        check("exe 旁边能找到", haptics.find_server_exe(), beside)
+
+        # 只放在上一级目录（发行包解压在别处时的常见情况）
+        os.remove(beside)
+        above = os.path.join(scratch, "VIIPER-2.0.0-x64.exe")
+        open(above, "wb").close()
+        check("上一级目录也能找到", haptics.find_server_exe(), above)
+
+        # 哪儿都没有
+        os.remove(above)
+        check("都没有就返回 None", haptics.find_server_exe(), None)
+        check("候选目录里包含程序目录和它的上一级",
+              haptics._viiper_search_roots()[:2], [app, os.path.dirname(app)])
+    finally:
+        paths_module.app_dir = original_app_dir
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -1301,6 +1387,10 @@ class FakeRunner:
         self.failed = False
         self.running = False
         self.stopped = 0
+        self.prefer_calls = []
+
+    def prefer_combined(self, value):
+        self.prefer_calls.append(bool(value))
 
     def prepare(self):
         self.prepares += 1
@@ -1485,23 +1575,23 @@ def test_gui_wiring() -> None:
         check("关掉要求停引擎并拆端点", app.haptics_runner.offs >= 1, True)
         check("关掉也记住了", settings.haptics_enabled(settings_file), False)
 
-        print("\n[13g2] 转发模式不碰虚拟声卡（端点只由震动开关管）")
-        app.toggle_haptics()                    # 先确保开关处于关（并记下基线）
-        before = (app.haptics_runner.prepares, app.haptics_runner.offs,
-                  len(app.haptics_runner.requests))
-        app.ds5_var.set(True)
-        app.toggle_ds5()
+        print("\n[13g2] 只有虚拟 DualSense 模式会把端点让给它（Windows 的 2- 命名）")
+        runner = app.haptics_runner
+        runner.prefer_calls.clear()
         app.forward_var.set(True)
         app.toggle_forward()
+        check("完整转发（DS4）不碰端点归属", runner.prefer_calls, [])
         app.motion_only_var.set(True)
         app.toggle_motion_only()
+        check("仅体感也不碰", runner.prefer_calls, [])
+        app.ds5_var.set(True)
+        app.toggle_ds5()
+        check("虚拟 DualSense → 让出去（复用它的音频接口）",
+              runner.prefer_calls, [True])
         app.ds5_var.set(False)
-        app.motion_only_var.set(False)
-        app.forward_var.set(False)
-        app.toggle_forward()
-        after = (app.haptics_runner.prepares, app.haptics_runner.offs,
-                 len(app.haptics_runner.requests))
-        check("切换转发模式不动震动端点", after, before)
+        app.toggle_ds5()
+        check("离开虚拟 DualSense → 收回来自建",
+              runner.prefer_calls, [True, False])
         check("（震动开关本身仍是关的）", app.haptics_var.get(), False)
 
         print("\n[13h] 起不来时开关必须弹回去")

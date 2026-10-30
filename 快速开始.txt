@@ -1,4 +1,4 @@
-﻿原神陀螺仪助手 · GenshinGyro v1.4.0   快速开始
+﻿原神陀螺仪助手 · GenshinGyro v1.4.1   快速开始
 ================================================================
 
 一、先装驱动（只需一次，但绕不过去）
@@ -10,16 +10,17 @@
     2. 下载 ViGEmBus_*.exe 并安装（需要管理员权限）
     3. 提示重启就重启
 
-  另外两个按需准备（都是"用虚拟 DualSense / 震动"才需要，先驱动后程序）：
+  再准备一样（只有用「虚拟 DualSense / 震动」才需要）：
     * usbip-win2 —— USB/IP 的内核驱动，VIIPER 的底层，只装一次。
       到 https://github.com/vadimgrn/usbip-win2/releases/tag/v.0.9.7.7
       下载 0.9.7.7 的 x64 安装包，管理员权限安装（装完重启一次）。
       ★ 版本必须是 0.9.7.7：装别的版本 VIIPER 会直接报「requires usbip-win2 0.9.7.7」。
       ★ 默认装到 C:\Program Files\USBip\（里面有 usbip.exe），VIIPER 会自己找到，
         不用手动加 PATH；装到别处就要把那个目录加进 PATH。
-    * VIIPER —— 到 https://github.com/alia5/VIIPER/releases 下载 VIIPER-*-x64.exe，
-      放到 GenshinGyro.exe 旁边（或它的上一级目录）即可，程序会自己启动它。
-    * HidHide —— NS 模式必须，其它情况见第四节。
+
+  ★ VIIPER 不用下载：发行包里已经带了 VIIPER-0.1.9-rc4.6.6-x64.exe，
+    就在 GenshinGyro.exe 旁边。别删它 —— 删了震动就会报「没找到 VIIPER-*.exe」。
+  ★ HidHide —— NS 模式必须，其它情况见第四节。
 
 二、打开程序
 
@@ -157,8 +158,9 @@
       写「等待手柄」    = 手柄没被程序拿到，按一下手柄任意键
       写「已开启（…）」 = 一切正常，那就是游戏本身没往这个端点写触觉音频；
                           原神会写，大多数别的 PC 游戏只发普通 rumble 报文，收不到
-    两个功能同时开时系统里会有两台同名「扬声器 (DualSense …)」端点，
-    游戏可能挑错那台：把震动开关关一下再开，程序就会复用虚拟手柄那台。
+    ★ 系统里永远只有一台「扬声器 (DualSense Wireless Controller)」，名字不带
+      「2-」这种前缀（游戏按名字找输出，带前缀它就找不到、震动就没了）。
+      做法：转发到虚拟 DualSense 时音频接口长在手柄上，震动打开时直接复用它。
   * 提示「没找到 VIIPER-*.exe」 → 按第一节把 VIIPER 放到 GenshinGyro.exe 旁边。
   * 和 DS4Windows / Steam 冲突 → 同一只手柄同时只能被一个程序独占读取。
     测试和游玩时请只运行本程序，并关掉 Steam 对该游戏的输入接管。
