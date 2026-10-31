@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 #: Short description of what this build is, used by --version and the snapshot.
 __summary__ = ("原神陀螺仪助手 / GenshinGyro —— Switch Pro 手柄 与 DualShock 4（有线·蓝牙）"

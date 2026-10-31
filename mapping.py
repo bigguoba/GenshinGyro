@@ -267,10 +267,6 @@ class MappingConfig:
     #: units the game receives.
     motion_deadzone_dps: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
-    #: Below this rotation rate (degrees/second, after gain) no compensation is
-    #: added, so a pad lying still cannot make the view drift on sensor noise.
-    motion_deadzone_gate_dps: float = 0.5
-
     #: fraction of the stick travel ignored around the centre
     stick_deadzone: float = 0.0
 
@@ -558,18 +554,19 @@ def apply_motion_deadzone(gyro, config: "MappingConfig"):
     Order of the triple is the DS4's own: (pitch X, yaw Y, roll Z) -- i.e. exactly
     what the game receives, so the three sliders mean what they say.
 
-    A tiny rotation is left alone: only rates above ``motion_deadzone_gate_dps``
-    get the bias, so a pad that is lying still (sensor noise only) never drifts.
     The bias keeps the sign of the measurement, so the view always turns the same
-    way the pad does.
+    way the pad does.  There is no lower rate limit (v1.4.2): the compensation is
+    applied to every sample, so slow rotations get the full lift instead of waiting
+    to cross a threshold.  Set the axis to 0 to switch it off -- with a non-zero
+    value, sensor noise at rest also gets the bias, so the view creeps.
     """
     comp = tuple(config.motion_deadzone_dps)
     if not any(comp):
         return tuple(gyro)
-    gate = config.motion_deadzone_gate_dps * DS4_GYRO_COUNTS_PER_DPS
     out = []
     for value, amount in zip(gyro, comp):
-        if not amount or abs(value) <= gate:
+        if not amount or not value:
+            # 0 就是 0：没有方向就不知道该往哪边补，硬补会让画面朝一边转。
             out.append(value)
             continue
         bias = amount * DS4_GYRO_COUNTS_PER_DPS
